@@ -1,4 +1,30 @@
 #!/usr/bin/env python3
+"""Train the main Qwen 4B-class structured judge with LoRA or QLoRA.
+
+Pipeline step:
+    07 / 08
+
+Goal:
+    Fine-tune the project's main model path so it can output structured safety
+    judgments with ``label``, ``reason``, ``evidence``, and ``confidence``.
+    Unlike step 03, this is not a quick baseline; it is the primary training
+    path for the MVP.
+
+Inputs:
+    - ``data/processed/sft_train.jsonl``
+    - ``data/processed/sft_dev.jsonl``
+
+Outputs:
+    - LoRA adapter files under ``outputs/sft_lora/``
+    - ``outputs/sft_lora/prompt_template.txt`` for later inference/eval reuse
+
+Key assumptions:
+    - Default model target is a Qwen 4B-class checkpoint.
+    - The intended hardware envelope is roughly an A100 80GB.
+    - LoRA keeps the script simple for learning; optional 4-bit loading provides
+      a QLoRA-style memory reduction path when bitsandbytes is available.
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -14,11 +40,21 @@ DEFAULT_PROMPT_TEMPLATE = "System:\n{system}\n\nUser:\n{user}\n\nAssistant:\n{as
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """Read SFT JSONL rows from disk."""
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
 
 def format_example(row: dict, eos_token: str) -> dict:
+    """Render one chat-style SFT example into a single training string.
+
+    Args:
+        row: SFT dataset row containing a 3-message conversation.
+        eos_token: Token appended so the model learns a clean response boundary.
+
+    Returns:
+        A dictionary with the ``text`` field expected by ``SFTTrainer``.
+    """
     messages = row["messages"]
     text = DEFAULT_PROMPT_TEMPLATE.format(
         system=messages[0]["content"],
@@ -29,8 +65,8 @@ def format_example(row: dict, eos_token: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a LoRA/QLoRA SFT model for structured safety judgment.")
-    parser.add_argument("--model_name_or_path", default="Qwen/Qwen2.5-3B-Instruct")
+    parser = argparse.ArgumentParser(description="Train the main LoRA/QLoRA SFT judge model for structured safety judgment. This is the project's primary Qwen path, not the step-03 baseline.")
+    parser.add_argument("--model_name_or_path", default="Qwen/Qwen3.5-4B")
     parser.add_argument("--train_file", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "processed" / "sft_train.jsonl")
     parser.add_argument("--eval_file", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "processed" / "sft_dev.jsonl")
     parser.add_argument("--output_dir", type=Path, default=Path(__file__).resolve().parents[1] / "outputs" / "sft_lora")
@@ -80,6 +116,10 @@ def main() -> None:
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "down_proj", "gate_proj"],
     )
+
+    # These target modules correspond to the main projection layers inside the
+    # transformer blocks, which is a common LoRA choice for adapting Qwen-class
+    # models without updating every parameter.
     model = get_peft_model(model, peft_config)
 
     train_ds = Dataset.from_list([format_example(row, tokenizer.eos_token) for row in train_rows])
@@ -97,10 +137,16 @@ def main() -> None:
         save_strategy="epoch",
         logging_steps=10,
         report_to=[],
+        # On A100 80GB, bf16 is typically the preferred mixed-precision mode.
+        # fp16 remains as a fallback for environments that do not expose bf16.
         bf16=torch.cuda.is_available() and torch.cuda.is_bf16_supported(),
         fp16=torch.cuda.is_available() and not torch.cuda.is_bf16_supported(),
     )
 
+    # The defaults here favor a readable, conservative starting point for a
+    # Qwen 4B-class model: small per-device batch size, gradient accumulation,
+    # and a 1024-token context that is usually enough for question/response +
+    # structured answer training on an A100 80GB.
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,

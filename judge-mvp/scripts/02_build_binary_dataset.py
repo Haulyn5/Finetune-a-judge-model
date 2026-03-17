@@ -1,4 +1,32 @@
 #!/usr/bin/env python3
+"""Build normalized binary classification data from WildGuardMix.
+
+Pipeline step:
+    02 / 08
+
+Goal:
+    Convert the raw dataset into a small, easy-to-read JSONL format shared by
+    later steps. This is the bridge between raw Hugging Face records and the
+    rest of the MVP pipeline.
+
+Inputs:
+    - Raw WildGuardMix train/test configs from Hugging Face.
+    - A label field such as ``response_harm_label``.
+
+Outputs:
+    - ``data/processed/train.jsonl``
+    - ``data/processed/dev.jsonl``
+    - ``data/processed/test.jsonl``
+
+Output schema:
+    {"id", "question", "response", "label", "split"}
+
+Key assumptions:
+    - ``prompt`` can be treated as the user question.
+    - ``response`` is the assistant answer to judge.
+    - Harm labels are normalized into the binary set ``safe`` / ``unsafe``.
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -17,12 +45,34 @@ LABEL_MAP = {
 
 
 def normalize_label(value: str | None) -> str | None:
+    """Map dataset-specific labels into the project-wide binary label space.
+
+    Args:
+        value: Raw label value from the source dataset.
+
+    Returns:
+        ``safe`` or ``unsafe`` when the label is recognized, otherwise ``None``.
+    """
     if value is None:
         return None
     return LABEL_MAP.get(str(value).strip().lower())
 
 
 def convert_records(dataset, source_split: str, label_field: str) -> list[dict]:
+    """Convert one dataset split into the normalized JSONL schema.
+
+    Args:
+        dataset: Iterable dataset split loaded from Hugging Face datasets.
+        source_split: Name to record in the normalized ``split`` field.
+        label_field: Source field that stores the safety label.
+
+    Returns:
+        A list of normalized records ready to be written to JSONL.
+
+    Side effects:
+        Invalid rows are skipped instead of causing hard failure, because this
+        stage is meant to clean source data into a stable downstream format.
+    """
     rows = []
     for idx, row in enumerate(dataset):
         question = (row.get("prompt") or row.get("question") or "").strip()
@@ -44,6 +94,7 @@ def convert_records(dataset, source_split: str, label_field: str) -> list[dict]:
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
+    """Write normalized rows to a UTF-8 JSONL file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -87,6 +138,8 @@ def main() -> None:
     dev_out = dev_part.to_dict("records")
     test_out = pd.DataFrame(test_rows).to_dict("records")
 
+    # We keep one canonical label space here so every later script can assume
+    # the same schema without re-implementing dataset-specific mappings.
     for row in dev_out:
         row["split"] = "dev"
 

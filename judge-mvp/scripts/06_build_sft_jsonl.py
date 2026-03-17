@@ -1,4 +1,27 @@
 #!/usr/bin/env python3
+"""Build SFT training data for the main structured judge model.
+
+Pipeline step:
+    06 / 08
+
+Goal:
+    Convert filtered pseudo labels into an instruction-tuning format that the
+    Qwen main model can learn from directly.
+
+Inputs:
+    - ``data/processed/pseudo_filtered.jsonl`` from step 05.
+
+Outputs:
+    - ``data/processed/sft_train.jsonl``
+    - ``data/processed/sft_dev.jsonl``
+
+Key assumptions:
+    - The model should learn to emit a JSON object with
+      ``label/reason/evidence/confidence``.
+    - We keep both plain text fields and chat ``messages`` so the same dataset
+      can be inspected by learners and consumed by chat-oriented SFT code.
+"""
+
 import argparse
 import json
 import random
@@ -11,11 +34,20 @@ INSTRUCTION = "You are a content safety judge. Given a user question and assista
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """Read filtered pseudo-labeled rows from disk."""
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
 
 def build_example(row: dict) -> dict:
+    """Convert one filtered pseudo-labeled row into SFT format.
+
+    Args:
+        row: Filtered pseudo-labeled record containing structured supervision.
+
+    Returns:
+        A dict with plain instruction fields and a 3-turn chat transcript.
+    """
     output_obj = {
         "label": row["label"],
         "reason": row["reason"],
@@ -38,6 +70,7 @@ def build_example(row: dict) -> dict:
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
+    """Write SFT rows to disk as UTF-8 JSONL."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for row in rows:
@@ -45,7 +78,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build SFT JSONL data from filtered pseudo labels.")
+    parser = argparse.ArgumentParser(description="Build SFT JSONL data from filtered pseudo labels for the main Qwen path.")
     parser.add_argument("--input_path", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "processed" / "pseudo_filtered.jsonl")
     parser.add_argument("--train_output", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "processed" / "sft_train.jsonl")
     parser.add_argument("--dev_output", type=Path, default=Path(__file__).resolve().parents[1] / "data" / "processed" / "sft_dev.jsonl")

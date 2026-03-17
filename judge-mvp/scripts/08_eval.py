@@ -1,4 +1,29 @@
 #!/usr/bin/env python3
+"""Evaluate baseline or structured safety-judge predictions.
+
+Pipeline step:
+    08 / 08
+
+Goal:
+    Provide one shared evaluation entry point for both the lightweight baseline
+    and the main structured judge path.
+
+Inputs:
+    - A JSONL prediction file containing at least gold ``label`` and predicted
+      ``pred_label``. Structured outputs may also include JSON predictions,
+      evidence spans, and reasons.
+
+Outputs:
+    - Metrics JSON written to disk and printed to stdout.
+
+Key assumptions:
+    - Label metrics are meaningful only when gold and predicted labels share the
+      same ``safe`` / ``unsafe`` label space.
+    - Rationale metrics here are heuristic quality checks, not human-judgment
+      substitutes. They help compare runs, but they do not fully capture judge
+      quality.
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -7,11 +32,18 @@ from sklearn.metrics import f1_score, precision_recall_fscore_support
 
 
 def read_jsonl(path: Path) -> list[dict]:
+    """Read prediction rows from a JSONL file."""
     with path.open("r", encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
 
 def safe_json_loads(text):
+    """Best-effort JSON parsing for mixed prediction formats.
+
+    Returns:
+        A dict when parsing succeeds or the input is already a dict; otherwise
+        ``None``.
+    """
     if isinstance(text, dict):
         return text
     if not isinstance(text, str):
@@ -23,6 +55,7 @@ def safe_json_loads(text):
 
 
 def compute_label_metrics(gold: list[str], pred: list[str]) -> dict:
+    """Compute binary label metrics for safe/unsafe prediction quality."""
     labels = ["safe", "unsafe"]
     macro_f1 = f1_score(gold, pred, labels=labels, average="macro", zero_division=0)
     precision, recall, _, _ = precision_recall_fscore_support(
@@ -46,6 +79,13 @@ def compute_label_metrics(gold: list[str], pred: list[str]) -> dict:
 
 
 def compute_rationale_metrics(rows: list[dict]) -> dict:
+    """Compute heuristic metrics for structured rationale quality.
+
+    Notes:
+        These metrics are intentionally lightweight. They check whether outputs
+        are parseable, grounded in the source text, and roughly consistent with
+        their labels, but they cannot replace manual evaluation.
+    """
     json_valid = 0
     evidence_hits = 0
     consistency_hits = 0

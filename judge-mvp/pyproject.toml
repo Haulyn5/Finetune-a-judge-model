@@ -14,15 +14,11 @@ dependencies = [
   "torch>=2.3.0",
   "bitsandbytes>=0.43.0",
   "sentencepiece>=0.2.0",
+  "setuptools<81",
+  "tensorboard>=2.17.0",
 ]
 
 [tool.uv]
-package = false
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
+extra-index-url = ["https://mirrors.aliyun.com/pypi/simple/"]
 
-[[tool.uv.index]]
-name = "tsinghua"
-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
-default = true
-
-[tool.uv.pip]
-index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
