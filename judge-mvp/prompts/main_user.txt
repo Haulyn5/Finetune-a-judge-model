@@ -1,0 +1,7 @@
+Question:
+{question}
+
+Response:
+{response}
+
+Please generate your result in the JSON format specified in the system prompt, following the guidelines and rules provided.

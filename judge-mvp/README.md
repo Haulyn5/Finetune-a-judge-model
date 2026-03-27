@@ -1,6 +1,6 @@
 # Judge MVP: WildGuardMix 内容安全裁判模型
 
-这个项目从零搭建一个可执行的 LLM 后训练 MVP，目标是基于 `allenai/wildguardmix` 训练一个输出 `label + reason + evidence + confidence` 的内容安全裁判模型。
+这个项目从零搭建一个可执行的 LLM 后训练 MVP，目标是基于 `allenai/wildguardmix` 训练一个输出 `label + reason + evidence` 的内容安全裁判模型。
 
 ## 目录结构
 
@@ -74,7 +74,7 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
 2. `04 -> 08`：**Qwen 4B 主训练路径**
    - 通过 teacher 伪标注、过滤、SFT、评估，训练真正输出
-     `label/reason/evidence/confidence` 的结构化安全裁判模型。
+     `label/reason/evidence` 的结构化安全裁判模型。
    - 默认设计继续对齐 **Qwen 4B 级模型**，并假设实验环境可使用 **A100 80GB**。
 
 如果你是第一次读这个项目，推荐先跑通 `01 -> 03` 理解数据与指标，再进入 `04 -> 08` 主路径。
@@ -181,9 +181,10 @@ uv run python scripts/03_train_baseline_cls.py \
 
 ```bash
 uv run python scripts/04_generate_rationale_pseudo.py \
-  --teacher_model Qwen/Qwen2.5-7B-Instruct \
+  --teacher_model Qwen/Qwen3.5-27B \
   --input_path data/processed/train.jsonl \
-  --max_samples 200
+  --max_samples 3000 \
+  --sampling_strategy balanced
 ```
 
 输出：
@@ -195,15 +196,15 @@ teacher 目标输出 JSON：
 {
   "label": "safe",
   "reason": "...",
-  "evidence": ["..."],
-  "confidence": 0.92
+  "evidence": ["..."]
 }
 ```
 
 说明：
 - 这一步是主路径的开始，不再只是分类，而是开始构造结构化监督信号。
+- 当前默认做法是对训练集进行平衡抽样，优先生成 safe/unsafe 更均衡的 teacher 数据。
+- Qwen3.5 teacher 通过 `tokenizer.apply_chat_template(..., enable_thinking=False)` 关闭 thinking。
 - 脚本会同时保留原始 teacher 文本和解析后的 JSON，便于后续调试解析失败问题。
-- 建议先用小样本验证流程。
 
 ---
 
@@ -218,15 +219,38 @@ uv run python scripts/05_filter_pseudo_labels.py
 - `evidence` 至少 1 条
 - 每条 evidence 必须能在原始 `question` 或 `response` 中匹配
 - `reason` 长度合理
-- 剔除常见拒答模板
 
 输出：
 - `data/processed/pseudo_filtered.jsonl`
+- `data/processed/pseudo_label_mismatch.jsonl`
+- `data/interim/pseudo_dropped.jsonl`
 
 为什么要做这一步：
 - 结构化 SFT 对噪声更敏感
-- 错误 evidence / 空 reason / 拒答式输出会显著拉低训练质量
+- 错误 evidence / 空 reason 会显著拉低训练质量
 - 与其追求样本更多，不如先保证监督信号更干净
+
+### Step 05 → Step 04 定向重跑 workflow
+
+当你调整了 teacher prompt，想只对会被 step 05 丢掉的样本重跑时，可以直接使用 dropped 子集：
+
+```bash
+uv run python scripts/05_filter_pseudo_labels.py \
+  --dropped_output_path data/interim/pseudo_dropped.jsonl
+
+uv run python scripts/04_generate_rationale_pseudo.py \
+  --input_path data/interim/pseudo_dropped.jsonl \
+  --output_path data/interim/pseudo_rerun.jsonl \
+  --sampling_strategy first_n \
+  --max_samples 1039 \
+  --rerun_tag drop_subset_rerun_v1
+```
+
+说明：
+- `pseudo_dropped.jsonl` 会保留原始 step 04 行字段，并新增 `drop_reason`
+- step 04 会忽略这些额外字段，只复用其中的 `id/question/response/label`
+- `--rerun_tag` 只是追踪字段，方便区分这是不是一轮 drop-only rerun
+- 当前推荐把 rerun 输出写到单独文件，再人工检查并决定如何 merge
 
 ---
 
@@ -255,7 +279,7 @@ uv run python scripts/06_build_sft_jsonl.py
 
 ### Step 07: 训练 Qwen 4B 级结构化输出主模型
 
-这一步是项目的主训练路径，目标是微调 Qwen 4B 级模型，使其稳定输出 `label/reason/evidence/confidence` 结构化判决。
+这一步是项目的主训练路径，目标是微调 Qwen 4B 级模型，使其稳定输出 `label/reason/evidence` 结构化判决。
 
 ```bash
 uv run python scripts/07_train_sft_lora.py \
@@ -279,45 +303,140 @@ uv run python scripts/07_train_sft_lora.py --load_in_4bit
 - 默认 `per_device_train_batch_size=1 + gradient_accumulation_steps=8`
   是为了让脚本在学习阶段更稳妥，也更接近大模型常见训练方式
 - 在 **A100 80GB** 上，`bf16` 往往是首选；脚本会在可用时优先启用
+- step 04 的 teacher 生成路径当前固定使用 vLLM + `bf16`，因此建议在支持 bf16 的 GPU 环境中运行
 - `max_seq_length=1024` 是一个便于起步的默认值，通常足以覆盖
   question/response 加结构化输出
 - `target_modules` 指的是 transformer 中主要投影层，是 LoRA 的常见注入位置
 
 ---
 
-### Step 08: 统一评估
+### Step 08: 统一生成与单文件评估
+
+先确认比较口径：
+
+- step 03 baseline 的最终对外评估数据是 [data/processed/test.jsonl](data/processed/test.jsonl)
+- baseline 的测试集预测文件是 `outputs/baseline_cls/test_predictions.jsonl`
+- step 08 统一把 `test.jsonl` 作为 comparison set，用来产出或评估：
+  - step 03 baseline
+  - `Qwen/Qwen3.5-4B` base model（SFT 前）
+  - step 07 LoRA model（SFT 后）
+
+#### 只评估单个 prediction file
 
 如果你已有生成式模型预测结果文件：
 
 ```bash
-uv run python scripts/08_eval.py \
+uv run python scripts/08_eval.py evaluate \
   --prediction_file outputs/predictions.jsonl \
+  --reference_file data/processed/test.jsonl \
   --output_file outputs/metrics.json
 ```
 
 如果只想先评估 baseline 分类器结果：
 
 ```bash
-uv run python scripts/08_eval.py \
+uv run python scripts/08_eval.py evaluate \
   --prediction_file outputs/baseline_cls/test_predictions.jsonl \
-  --output_file outputs/metrics.json
+  --reference_file data/processed/test.jsonl \
+  --output_file outputs/baseline_metrics.json
 ```
 
-输出指标包含：
-- `macro_f1`
-- `unsafe_recall`
-- `overblock_rate`
-- `refusal_rate`
-- `json_valid_rate`
-- `evidence_hit_rate`
-- `reason_label_consistency`
+#### 只生成 Qwen base / LoRA 在 test.jsonl 上的预测
+
+先生成 base Qwen 预测：
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com uv run python scripts/08_eval.py generate \
+  --mode base \
+  --test_file data/processed/test.jsonl \
+  --output_file outputs/qwen_base_test_predictions.jsonl
+```
+
+再生成 step 07 LoRA 预测：
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com uv run python scripts/08_eval.py generate \
+  --mode lora \
+  --test_file data/processed/test.jsonl \
+  --adapter_path outputs/sft_lora \
+  --output_file outputs/qwen_lora_test_predictions.jsonl
+```
+
+#### 一键顺序跑 base + LoRA 的生成与评估
+
+```bash
+HF_ENDPOINT=https://hf-mirror.com uv run python scripts/08_eval.py run \
+  --mode both \
+  --test_file data/processed/test.jsonl \
+  --reference_file data/processed/test.jsonl \
+  --adapter_path outputs/sft_lora
+```
 
 说明：
-- label 指标适合做主效果比较
-- rationale 指标是启发式质量检查，不等价于人工评估
-- `evidence_hit_rate` 只检查证据是否能在原文定位，不代表理由一定充分
+- step 08 现在只负责 prediction 生成与**单文件评估**，不再承担 compare/report 逻辑。
+- `generate` 支持 `--mode base|lora|both`。
+- `run` 会先生成，再立刻评估；`both` 模式会顺序执行 base，然后 lora。
+- LoRA 推理需要显式传 `--adapter_path`。
+- step 08 当前**只使用 Transformers 后端**。这是因为在项目编写期间，Qwen3.5 相关的 vLLM + LoRA 推理支持在本 workflow 中存在兼容性与版本冲突问题，因此这里统一改为 Transformers 推理；step 04 的 teacher 数据生成仍然继续使用 vLLM。
+- `both` 模式默认输出：
+  - `outputs/qwen_base_test_predictions.jsonl`
+  - `outputs/qwen_lora_test_predictions.jsonl`
+  - `outputs/qwen_base_metrics.json`
+  - `outputs/qwen_lora_metrics.json`
+- 如果 `outputs/sft_lora/` 中存在 `main_system.txt` 和 `main_user.txt`，LoRA 推理会优先复用这组训练期导出的 prompt；否则回退到 `prompts/` 下的 canonical prompt。
+- 如有多卡，脚本默认选择当前最空闲的卡；也可手动传 `--gpu_id`。
+- 长时间 generation 时会持续输出 JSON progress event，包含 `done/total/percent/elapsed/eta`。
 
----
+输出指标按三组组织：
+- `label_metrics`
+  - `accuracy`
+  - `macro_f1`
+  - `unsafe_precision`
+  - `unsafe_recall`
+  - `unsafe_f1`
+  - `overblock_rate`
+- `parse_metrics`
+  - `raw_json_parse_success_rate`
+  - `raw_json_parse_failure_rate`
+  - `fallback_usable_rate`
+- `rationale_metrics`
+  - `evidence_hit_rate`
+  - `reason_label_consistency`
+
+说明：
+- label 指标适合做主效果比较。
+- rationale 指标是启发式质量检查，不等价于人工评估。
+- `raw_json_parse_success_rate` 衡量模型原始输出能否被严格解析成 JSON。
+- `fallback_usable_rate` 衡量即使原始输出不够规范，是否仍能从现有字段中恢复出可评估结果。
+- 为兼容旧报告，输出里仍会保留 `json_valid_rate`，其含义等同于 `fallback_usable_rate`。
+- `evidence_hit_rate` 只检查证据是否能在原文定位，不代表理由一定充分。
+- 当前 `overblock_rate` 定义为：`gold == safe` 且 `pred == unsafe` 的样本数 / `gold == safe` 的样本数。
+- step 08 会校验 prediction file 与 `test.jsonl` 的行数与 `id` 对齐，避免误把不同 split 混在一起比较。
+
+### Step 09: 多模型对比分析
+
+当你已经有 baseline / Qwen base / Qwen LoRA 三份 step-08-compatible prediction file 时，可以使用 step 09 生成统一横向分析报告：
+
+```bash
+uv run python scripts/09_compare_models.py \
+  --reference_file data/processed/test.jsonl \
+  --baseline_file outputs/baseline_cls/test_predictions.jsonl \
+  --qwen_base_file outputs/qwen_base_test_predictions.jsonl \
+  --qwen_lora_file outputs/qwen_lora_test_predictions.jsonl \
+  --output_dir outputs/step09_compare
+```
+
+step 09 会输出：
+- `comparison_analysis.json`
+- `comparison_analysis.md`
+
+step 09 是唯一的 compare / analysis 层，负责：
+- confusion matrix
+- predicted label distribution
+- pairwise delta
+- per-metric ranking
+- 自动生成的关键结论（基于真实结果，而不是写死假设）
+
 
 ## 4. 常见错误
 
@@ -375,26 +494,10 @@ Qwen 主路径优先降低：
 
 ---
 
-## 5. 验证清单
+## 5. 数据集情况
 
-1. 环境验证：
-   - `uv run python scripts/01_inspect_dataset.py` 能打印字段与样本。
-2. 数据验证：
-   - `data/processed/*.jsonl` 存在且 label 只包含 `safe/unsafe`。
-3. baseline 验证：
-   - `uv run python scripts/03_train_baseline_cls.py --num_train_epochs 1` 能产出：
-     - `outputs/baseline_cls/metrics.json`
-     - `outputs/baseline_cls/test_predictions.jsonl`
-4. 主路径验证：
-   - `README` 与 `scripts/07_train_sft_lora.py` 都明确主模型是 Qwen 4B 级，baseline 不是最终模型。
-5. 输出验证：
-   - `outputs/metrics.json` 包含：
-     - `macro_f1`
-     - `unsafe_recall`
-     - `overblock_rate`
-     - `refusal_rate`
-     - `json_valid_rate`
-     - `evidence_hit_rate`
-6. 端到端抽检：
-   - 按 `01 -> 03` 至少跑通一次
-   - 随机查看预测结果，确认脚本输入输出和设计目的都能从 README 与源码 docstring 中读懂
+以下统计基于 **原始** `allenai/wildguardmix` 数据集的官方 `train/dev/test` split，统计时间为 **2026-03-27**。它主要用于帮助读者快速理解原始数据分布，不代表后续经过过滤、重采样或伪标注处理后的项目中间数据规模。
+
+- `train`：共 34140 条，其中 `safe=26609`、`unsafe=7531`，占比约为 `77.9% / 22.1%`
+- `dev`：共 3794 条，其中 `safe=2957`、`unsafe=837`，占比约为 `77.9% / 22.1%`
+- `test`：共 1709 条，其中 `safe=1425`、`unsafe=284`，占比约为 `83.4% / 16.6%`

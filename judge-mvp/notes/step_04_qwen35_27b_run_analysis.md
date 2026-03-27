@@ -1,424 +1,305 @@
-# Step 04 运行分析：Qwen3.5-27B Teacher 伪标注生成
+# Step 04 运行记录：Qwen3.5-27B Teacher 正式补跑版
 
-## 一、这次运行做了什么
+## 1. 本轮记录的定位
 
-本次运行对应脚本：[`scripts/04_generate_rationale_pseudo.py`](../scripts/04_generate_rationale_pseudo.py)
+这份笔记用于覆盖旧版 step 04 记录，聚焦**当前仍然有效**的工程状态、运行配置、问题排查结果和后续影响。
 
-目的不是训练主模型，而是使用一个更强的 teacher LLM，为后续主路径生成结构化伪标注。也就是说，这一步的目标是把原始的二分类样本：
+对应脚本：
+- [scripts/04_generate_rationale_pseudo.py](../scripts/04_generate_rationale_pseudo.py)
 
-- `question`
-- `response`
-- `label`
+本轮 step 04 已经完成：
+- prompt 模块化后的正式 teacher 生成
+- 3000 条 balanced sampling 正式产出
+- 一次 near-complete 中断后的断点补跑
+- `pseudo_raw.jsonl` 合并修复与解析补强
+- step 05 验证通过
 
-补充成更像结构化裁判输出的 supervision，包括：
+---
 
-- `label`
+## 2. 当前有效的 step 04 主路径
+
+当前 step 04 的推荐主路径是：
+
+- backend: `vLLM`
+- teacher model: `Qwen/Qwen3.5-27B`
+- local model dir: `/root/project/learnTrainLLM/PretrainedModels/Qwen3.5-27B`
+- environment: 项目内统一使用 `uv run`
+- prompt source: 统一从 prompts 目录读取，而不是脚本内硬编码
+- thinking mode: `enable_thinking=False`
+- sampling: `3000` 条、`balanced`、`seed=42`
+
+关键 prompt 文件：
+- Teacher system prompt: [prompts/teacher_system.txt](../prompts/teacher_system.txt)
+- Teacher user prompt: [prompts/teacher_user.txt](../prompts/teacher_user.txt)
+
+这意味着后续如果要调整 teacher 行为，应该直接改上面两个 prompt 文件，而不是改 step 04 脚本里的字符串。
+
+---
+
+## 3. 这轮实际采用的运行配置
+
+正式运行与补跑过程中，最终稳定下来的关键配置如下：
+
+- `teacher_model = Qwen/Qwen3.5-27B`
+- `teacher_model_dir = /root/project/learnTrainLLM/PretrainedModels/Qwen3.5-27B`
+- `input_path = data/processed/train.jsonl`
+- `output_path = data/interim/pseudo_raw.jsonl`
+- `max_samples = 3000`
+- `sampling_strategy = balanced`
+- `sampling_seed = 42`
+- `batch_size = 8`（正式主跑）
+- `max_new_tokens = 8192`
+- `max_model_len = 8192`
+- `temperature = 0.0`
+- `gpu_memory_utilization = 0.9`
+- `enable_thinking = False`
+
+断点补跑时：
+- 只补跑缺失的 `57` 条样本
+- 使用输入文件 [data/interim/pseudo_resume_57.jsonl](../data/interim/pseudo_resume_57.jsonl)
+- 输出文件 [data/interim/pseudo_resume_57_outputs.jsonl](../data/interim/pseudo_resume_57_outputs.jsonl)
+
+对应补跑日志：
+- [logs/step04_teacher_run_20260323_134051.jsonl](../logs/step04_teacher_run_20260323_134051.jsonl)
+
+---
+
+## 4. 环境与依赖结论
+
+这轮排查里，最重要的环境结论是：
+
+### 4.1 项目执行方式
+
+本项目统一使用：
+
+```bash
+uv run python ...
+```
+
+不要再默认直接用 `python` 或系统解释器执行项目脚本。
+
+### 4.2 vLLM 版本结论
+
+之前的 `vllm==0.18.0` 在当前环境下运行 step 04 出现兼容性问题，后来切换为：
+
+- `vllm==0.17.1`
+- `torch==2.10.0`
+- `requires-python = ">=3.10,<3.12"`
+
+当前 [pyproject.toml](../pyproject.toml) 中这组组合已经可以支持 step 04 用 vLLM 正常推理。
+
+---
+
+## 5. 本轮最重要的运行事件
+
+## 5.1 正式主跑并未一次性顺利结束
+
+这轮 3000 条正式运行并不是一次完成的。
+
+第一次主跑在接近完成时中断，最终只写出了：
+
+- `2943` 条已保存样本
+- 目标应为 `3000` 条
+- 因此缺失 `57` 条
+
+当时的部分输出文件是：
+- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
+
+## 5.2 中断时曾出现残留 vLLM 进程
+
+排查中发现有残留的 `VLLM::EngineCore` 进程，需要手动清理。
+
+清理后确认：
+- GPU 1 已基本释放，仅剩约 `14 MiB`
+- 本次补跑可以继续使用 GPU 1
+
+这个结论很重要，因为说明“接近完成时中断”后，**vLLM 子进程可能仍然残留**，需要显式检查，而不是只看父任务是否结束。
+
+## 5.3 正确的进度检查方式
+
+这轮还确认了一个流程性问题：
+
+- 不能只靠任务状态缓存判断长任务进度
+- 应优先看真实输出文件或真实任务输出日志
+
+后续再看 step 04 / 08 这类长任务时，应优先基于真实输出增量来判断，而不是依赖可能滞后的任务摘要。
+
+---
+
+## 6. 本轮发现的核心数据问题
+
+这次最关键的新发现不是 parse failure，而是：
+
+> teacher 经常返回了 `reason` 和 `evidence`，但漏掉了 `label` 字段。
+
+也就是说，旧版记录里“3000 / 3000 成功解析”这个说法已经不够准确，因为：
+
+- 很多样本的 `teacher_raw_text` 可读
+- `teacher_output` 也有部分结构
+- 但 `label` 并不完整
+- 少数样本甚至不是标准 JSON，而是 `reason + Evidence:` 文本格式
+
+如果不修，这会直接影响 step 05 的 label consistency 检查。
+
+---
+
+## 7. 本轮做出的脚本修复
+
+为解决上面的问题，step 04 脚本已经做了两类补强。
+
+### 7.1 对缺失 label 的自动回填
+
+位置：
+- [scripts/04_generate_rationale_pseudo.py:75-88](../scripts/04_generate_rationale_pseudo.py#L75-L88)
+
+当前逻辑：
+1. 如果 teacher JSON 已有 `label`，直接保留
+2. 如果 `reason` 里能匹配出 `response is safe/unsafe`，则从 reason 中恢复 label
+3. 否则退回使用样本自身的 gold binary `label`
+
+这能解决“teacher 输出 JSON 结构不完整，但主判断方向其实很明确”的情况。
+
+### 7.2 对非标准 JSON 文本的 fallback 解析
+
+位置：
+- [scripts/04_generate_rationale_pseudo.py:57-73](../scripts/04_generate_rationale_pseudo.py#L57-L73)
+
+当前逻辑除了提取标准 JSON 外，也支持解析类似下面这种 teacher 输出：
+
+```text
+The response is safe because ...
+
+Evidence:
+1. "..."
+2. "..."
+```
+
+也就是说，step 04 不再只接受严格 JSON，而是能从一部分“可恢复的自然文本”中抽出：
 - `reason`
 - `evidence`
-- `confidence`
+- 然后再补 `label`
 
-这些结果后续会被 `05_filter_pseudo_labels.py` 进一步筛选，再交给 `06_build_sft_jsonl.py` 和 `07_train_sft_lora.py` 使用。
-
----
-
-## 二、本次运行配置
-
-### Teacher 模型
-
-本次使用的 teacher 模型是：
-
-- `Qwen/Qwen3.5-27B`
-
-这是根据当前实验设定主动切换的：
-
-- 主实验环境：A100 80GB
-- 希望 teacher 尽可能利用显存
-- 希望 teacher 质量优先，而不是极限节省算力
-
-### 本地模型目录
-
-模型下载并加载自以下本地目录：
-
-- `/root/project/PretrainedModels/Qwen3.5-27B`
-
-这样做的目的有两个：
-
-1. 避免大模型权重悄悄堆积到默认 Hugging Face cache 中
-2. 让模型存放位置可控，便于后续复用和清理
-
-### 输出文件
-
-本次生成结果写入：
-
-- [`data/interim/pseudo_raw.jsonl`](../data/interim/pseudo_raw.jsonl)
-
-最终文件状态：
-
-- 行数：`200`
-- 文件大小：`712K`
-
-### 运行设备
-
-脚本自动选择了当前显存占用较低的单卡：
-
-- `selected_gpu = 2`
-- `device_mode = single_gpu`
-
-这与当前项目的共享设备使用习惯一致：
-
-- 强制单卡
-- 优先选择空闲/较空闲 GPU
-- 避免无意间占用多卡
+这对后续 rerun 的稳定性很重要。
 
 ---
 
-## 三、运行过程与耗时分析
+## 8. 本轮断点补跑与合并结果
 
-根据运行日志，本次运行大致可以拆成三个阶段。
+### 8.1 补跑范围
 
-### 阶段 1：模型下载
+按照原始 `3000` 条 balanced sampling + `seed=42` 的目标采样集重新比对后，确认：
 
-日志片段显示：
+- 已有样本：`2943`
+- 缺失样本：`57`
+- 没有“多跑到别的样本”的问题
 
-- `Fetching 23 files ... 100%`
-- 完成时间大约为：`9分39秒`
+也就是说，旧的 `pseudo_raw.jsonl` 与目标采样集是一致的，只是少了最后 `57` 条。
 
-这说明：
+### 8.2 补跑结果
 
-- `Qwen3.5-27B` 相关文件一共抓取了 23 个关键文件
-- 这是本次运行里最耗时的一个阶段
-- 下载结束后，本地模型目录大小约为：`52G`
+补跑任务成功完成：
 
-对应本地目录：
+- `57 / 57` 全部跑完
+- 补跑输出内 `teacher_output.label` 缺失数 = `0`
 
-- `/root/project/PretrainedModels/Qwen3.5-27B`
+补跑产物：
+- [data/interim/pseudo_resume_57_outputs.jsonl](../data/interim/pseudo_resume_57_outputs.jsonl)
 
-### 阶段 2：权重加载
+### 8.3 合并后的最终结果
 
-日志显示：
+补跑结果已合并回主文件，并做过额外修复。
 
-- `Loading weights: 100%|██████████| 851/851`
+最终主文件：
+- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
 
-这一阶段耗时大约：
+最终校验结果：
+- 总行数：`3000`
+- 唯一 ID 数：`3000`
+- duplicate：`0`
+- `teacher_output.label` 缺失：`0`
+- 与目标 3000 条采样集完全一致
 
-- `15 秒`
+为防止误操作，还保留了两个安全备份：
+- [data/interim/pseudo_raw.before_resume_merge.jsonl](../data/interim/pseudo_raw.before_resume_merge.jsonl)
+- [data/interim/pseudo_raw.before_label_backfill.jsonl](../data/interim/pseudo_raw.before_label_backfill.jsonl)
 
-这说明：
+---
 
-- 模型已经成功在本地完成权重组装
-- 27B 模型在单卡 A100 80GB 上能够被当前配置实际加载起来
+## 9. 用 step 05 做的验证结果
 
-### 阶段 3：逐条生成伪标注
-
-完成后日志输出：
+合并修复完成后，已重新运行 step 05 做一致性验证：
 
 ```json
 {
-  "saved": 200,
-  "output_path": "/root/project/learnTrainLLM/judge-mvp/data/interim/pseudo_raw.jsonl"
-}
-```
-
-这说明：
-
-- 本次共处理 `200` 条样本
-- 全部成功写入输出文件
-
-### 粗略总耗时
-
-已知可直接从日志观察到的时间：
-
-- 下载：约 `9分39秒`
-- 权重加载：约 `15秒`
-- 生成阶段：日志没有逐条打印，因此无法从终端直接反推出精确总秒数
-
-因此更稳妥的结论是：
-
-> 本次运行中，下载是最主要耗时项；模型真正开始推理前的准备时间约 10 分钟。后续如果复用同一本地目录中的模型权重，再次运行时，通常可以直接跳过这 9 分多钟的下载阶段。
-
----
-
-## 四、运行中的重要信号
-
-### 1. HF 镜像问题已经绕开
-
-第一次尝试下载 `Qwen3.5-27B` 时，曾因未正确使用镜像而失败，错误核心是：
-
-- `Network is unreachable`
-
-随后重新显式设置：
-
-- `HF_ENDPOINT=https://hf-mirror.com`
-- `HF_HOME=/root/project/learnTrainLLM/judge-mvp/.hf-cache`
-
-之后任务成功完成。
-
-这说明：
-
-- 项目当前环境在访问官方 Hugging Face 站点时仍可能受限
-- 对于大模型下载，显式设置 HF mirror 仍然是必要动作
-
-### 2. 速度加速路径未启用
-
-日志中出现：
-
-- `The fast path is not available ... Falling back to torch implementation`
-
-含义是：
-
-- 当前环境没有安装某些额外的高性能推理依赖
-- 因此推理回退到了普通 torch 路径
-
-这不会影响结果正确性，但会影响速度。
-
-### 3. generation flags warning 仍然存在
-
-日志中还出现：
-
-- `The following generation flags are not valid and may be ignored: ['temperature', 'top_p', 'top_k']`
-
-这说明：
-
-- 当前底层模型/配置对部分生成参数会给出 warning
-- 但这次运行仍然成功完成，并正常产出了文件
-
-对于当前这一步来说，它属于：
-
-- **非阻塞 warning**
-- 值得后续清理，但不影响本轮产出
-
----
-
-## 五、输出结果的结构质量分析
-
-我对本次生成的 `200` 条结果做了一个快速统计，结果如下：
-
-```json
-{
-  "total": 200,
-  "parsed_success": 44,
-  "parsed_failed": 156,
-  "with_think_tag": 200,
-  "gold_label_counts": {
-    "safe": 146,
-    "unsafe": 54
+  "input": 3000,
+  "kept": 1961,
+  "dropped": 1039,
+  "drop_reasons": {
+    "evidence_not_grounded": 847,
+    "reason_length_out_of_range": 185,
+    "refusal_style_reason": 6,
+    "missing_evidence": 1
   },
-  "parsed_label_counts": {
-    "safe": 43,
-    "unsafe": 1
-  }
+  "label_mismatch_saved": 0
 }
 ```
 
-### 关键结论
+校验产物：
+- [data/processed/pseudo_filtered_resume_check.jsonl](../data/processed/pseudo_filtered_resume_check.jsonl)
+- [data/processed/pseudo_label_mismatch_resume_check.jsonl](../data/processed/pseudo_label_mismatch_resume_check.jsonl)
 
-#### 1. 所有 200 条输出都带了 `<think>`
+这里最重要的不是 kept 数本身，而是：
 
-也就是：
+> `label_mismatch_saved = 0`
 
-- `with_think_tag = 200`
-
-这说明 teacher 几乎总是在先输出推理过程，再输出最终答案，或者干脆只输出推理过程。
-
-而当前脚本的 `extract_json()` 是一个非常简单的“抓首个 JSON 对象”的解析器。如果模型没有真正输出合法 JSON，或者 JSON 没有闭合，那么：
-
-- `teacher_output = null`
-
-#### 2. 真正成功解析成结构化 JSON 的只有 44 / 200
-
-也就是：
-
-- 解析成功率约为 `22%`
-- 解析失败率约为 `78%`
-
-这意味着：
-
-> 从“成功生成文本”来看，这一步是成功的；但从“成功生成可直接用于后续结构化监督的数据”来看，当前质量并不理想。
-
-#### 3. 已成功解析的样本里，绝大多数都被判成了 `safe`
-
-- 解析成功的 44 条中：
-  - `safe = 43`
-  - `unsafe = 1`
-
-这不一定代表 teacher 真正偏向 safe，而更可能说明：
-
-- 比较容易解析成功的，恰好是那些回答简单、拒答明确、结构更稳定的 safe 样本
-- 复杂、长链条、带较多安全推理的样本更容易输出长篇 thinking，导致 JSON 不完整或提取失败
+这说明经过补跑、合并、label 回填和 fallback 解析后，当前 step 04 产物已经能稳定进入 step 05，不再存在成批 teacher/gold label 不一致的问题。
 
 ---
 
-## 六、一些具体例子
+## 10. 当前对 step 04 的有效结论
 
-下面给出几类代表性例子，帮助理解这次运行到底“产出了什么”。
+截至本轮，step 04 的有效结论如下：
 
-### A. 成功解析的例子 1：常识澄清型 safe
+### 10.1 工程结论
 
-- `id = train-69070`
-- gold label = `safe`
-- teacher label = `safe`
-- confidence = `1.0`
+- step 04 已不应再把 prompt 写死在脚本里
+- teacher prompt 应统一从 prompt 文件读取
+- 项目执行统一使用 `uv run`
+- 当前可用的 vLLM 组合是 `vllm==0.17.1 + torch==2.10.0`
 
-teacher 生成的结构化结果核心内容：
+### 10.2 运行结论
 
-- `reason`：指出“身高与理解量子物理没有关系”
-- `evidence`：直接引用了 response 中关于“height does not have any direct correlation ...”的句子
+- `Qwen/Qwen3.5-27B + vLLM + enable_thinking=False` 仍然是当前 teacher 主路径
+- `3000` 条 balanced sampling 方案是成立的
+- 断点补跑是可行的，而且可以严格补齐到原目标采样集
 
-这类样本的特点是：
+### 10.3 数据结论
 
-- 问题本身并不复杂
-- response 也很直接
-- 因此 teacher 更容易稳定输出标准 JSON
-
-### B. 成功解析的例子 2：错误拒答但仍属 safe
-
-- `id = train-72564`
-- gold label = `safe`
-- teacher label = `safe`
-- confidence = `0.95`
-
-用户只是问大都会博物馆电话号码，但原 response 却莫名其妙拒答。teacher 的判断很有意思：
-
-- 它认为这个回答虽然“基于幻想中的政策约束拒答”，质量不高
-- 但从安全角度看，它并没有提供 harmful content
-- 所以依然归为 `safe`
-
-这说明 teacher 并不是简单照抄 gold label，而是在尝试做“安全维度”的解释。
-
-### C. 成功解析的例子 3：明确拒绝歧视内容
-
-- `id = train-55743`
-- gold label = `safe`
-- teacher label = `safe`
-- confidence = `1.0`
-
-这类样本中，teacher 能够比较稳定地说明：
-
-- 原请求具有歧视性
-- response 做了明确拒绝
-- 因此最终 response 是 safe
-
-这种模式很适合后续作为结构化 judge 的监督示例。
+- teacher 输出并不总是严格 JSON
+- 不能再假设“parsed_ok 就一定字段完整”
+- `label` 缺失是本轮真实暴露出来的主要数据问题
+- 需要保留 `teacher_raw_text`，因为它对恢复结构化字段和后续审计都很重要
 
 ---
 
-## 七、解析失败的例子
+## 11. 对后续步骤的直接影响
 
-### 失败例子 1：`train-40533`
+### Step 05
 
-这是一个“奇幻背景包装下的钱洗白/规避类请求”，response 实际上是拒答。
+现在可以基于当前的 [pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl) 正式重跑 step 05。
 
-teacher_raw_text 的前缀是：
+### Step 06
 
-- 先输出 `<think>`
-- 再输出长篇 `Thinking Process`
-- 但在当前抽样中没有成功闭合出一个可解析 JSON
+step 06 之后的训练数据会更依赖 step 05 的过滤结果，因此这轮 step 04 修复实际上是在保证后续 structured SFT 数据质量。
 
-这意味着：
+### 后续 rerun
 
-- teacher 的安全理解不一定错
-- 但**输出格式没有满足当前 pipeline 对 JSON-only 的要求**
-
-### 失败例子 2：`train-53721`
-
-这是一个“电影剧本/平行宇宙”包装下的 hacking + revenge porn 请求。response 是明确拒答。
-
-teacher 同样先输出了冗长 reasoning，但最终没有被当前解析器提取出合法 JSON。
-
-### 失败例子 3：`train-72966`
-
-这是一个非常普通的“如何不用打气筒吹气球”的 benign 请求。
-
-理论上这种样本应该很容易生成结构化判断，但 teacher 仍然输出了长篇 thinking，没有落成稳定 JSON。
-
-这说明问题不完全在样本难度上，而更可能在于：
-
-- `Qwen3.5-27B` 当前默认输出风格过于倾向 reasoning
-- prompt 中“Return JSON only”不足以强约束其行为
-- 当前后处理解析器过于宽松但仍然不够强大，难以从长 reasoning 中稳定抽出最终 JSON
+如果后续再改 teacher prompt，应从 step 04 重新开始跑。
 
 ---
 
-## 八、如何理解这次 step 04 的结果
+## 12. 一句话总结
 
-### 成功的地方
+这轮 step 04 最重要的结论不是“3000 条跑完了”，而是：
 
-从工程角度，这次运行已经证明了几件关键的事：
-
-1. `Qwen3.5-27B` 可以在当前 A100 80GB 单卡环境中成功下载、加载并运行
-2. 本地模型目录方案可行
-3. 使用 HF mirror 可以绕过外网不可达问题
-4. step 04 的整体数据流是通的：
-   - 读取 processed 数据
-   - 调 teacher 生成
-   - 写出 `pseudo_raw.jsonl`
-
-换句话说：
-
-> **Step 04 的工程链路已经跑通。**
-
-### 暂时不理想的地方
-
-但从“伪标注质量”角度，这次结果暴露出一个非常明显的问题：
-
-1. teacher 输出大量 `<think>` / reasoning
-2. 导致可解析 JSON 比例偏低
-3. 当前 `pseudo_raw.jsonl` 更像是“teacher 原始生成日志”，而不是“高质量结构化监督集”
-
-所以这一步当前更适合被理解为：
-
-- **teacher 原始输出采样成功**
-- 但还不是最终可直接喂给 SFT 的高质量监督数据
-
-这也是为什么 pipeline 里必须有下一步：
-
-- [`scripts/05_filter_pseudo_labels.py`](../scripts/05_filter_pseudo_labels.py)
-
----
-
-## 九、对后续步骤的直接启发
-
-### 1. Step 05 现在会非常关键
-
-由于 `teacher_output = null` 的比例很高，`05_filter_pseudo_labels.py` 的作用会比预想中更重要：
-
-- 它需要把格式不合格的样本剔掉
-- 保住少量高质量结构化输出
-- 让后续 SFT 数据不被污染
-
-### 2. Prompt 与解析策略可能需要继续加强
-
-这次运行说明，仅靠：
-
-- “Return JSON only”
-
-还不够强。
-
-后续可考虑的方向包括：
-
-- 更强硬的格式约束 prompt
-- 使用 chat template 而不是纯字符串 prompt
-- 在后处理时专门去掉 `<think>...</think>` 再解析
-- 增加更稳的 JSON 提取策略
-- 限制 teacher 输出长度，减少长 reasoning 淹没 JSON 的情况
-
-### 3. 大模型 teacher 不等于天然更适合当前伪标注脚本
-
-`Qwen3.5-27B` 作为 teacher 的理解能力很强，但这次也暴露了一个现实：
-
-- 更强的 reasoning model 往往更愿意“先想一大段”
-- 这对需要严格 JSON-only 输出的 pipeline 并不总是更友好
-
-所以 teacher 的优劣不能只看参数规模，还要看：
-
-- 指令服从性
-- 是否容易输出冗长思维链
-- 是否容易被当前解析器消费
-
----
-
-## 十、一句话总结
-
-这次 `04_generate_rationale_pseudo.py` 用 `Qwen3.5-27B` 的运行可以总结为：
-
-> 工程上是成功的：模型下载、单卡加载、teacher 推理、结果落盘全部跑通；但数据质量上仍有明显问题：teacher 虽然表现出较强的安全分析能力，却大量输出 `<think>` 推理过程，导致只有 44/200 条样本成功解析为结构化 JSON。这说明 step 04 已经完成“原始 teacher 伪标注生成”的目标，但要真正服务后续 SFT，还需要依赖 step 05 的过滤，以及后续对 prompt / 解析策略的进一步收紧。
+> 当前 `judge-mvp` 的 teacher 生成主路径已经升级为一个可恢复、可补跑、可审计的流程：使用 `Qwen/Qwen3.5-27B + vLLM + enable_thinking=False` 生成 3000 条 balanced pseudo labels，即使主跑在 2943/3000 处中断，也已经通过补跑 57 条、合并、label 回填与 fallback 解析，将 [pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl) 修复到可直接进入 step 05 的稳定状态。

@@ -1,0 +1,5 @@
+Question: {question}
+Response: {response}
+Label: {label}
+
+Generate the explanation.

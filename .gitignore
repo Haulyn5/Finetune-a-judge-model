@@ -21,6 +21,7 @@ judge-mvp/data/processed/*
 judge-mvp/outputs/*
 !judge-mvp/outputs/.gitkeep
 judge-mvp/logs/
+PretrainedModels/
 
 # Training artifacts
 *.bin
@@ -34,3 +35,6 @@ judge-mvp/logs/
 .vscode/
 .idea/
 .DS_Store
+
+# temp files
+temp/*
