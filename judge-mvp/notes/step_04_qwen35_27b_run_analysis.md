@@ -1,305 +1,372 @@
-# Step 04 运行记录：Qwen3.5-27B Teacher 正式补跑版
+# Step 04 运行记录：Qwen3.5-27B Teacher 扩充到 15000 条（当前主版本）
 
-## 1. 本轮记录的定位
+## 1. 本文定位
 
-这份笔记用于覆盖旧版 step 04 记录，聚焦**当前仍然有效**的工程状态、运行配置、问题排查结果和后续影响。
+这份笔记以**最新完成且当前有效**的 step 04 结果为主，记录本次 `Qwen/Qwen3.5-27B` teacher 扩充运行的：
+- 目标
+- 环境与依赖修复
+- 运行配置
+- 产物位置
+- 最终结果
+- 对后续 step 05/06 的直接影响
 
-对应脚本：
+旧的 3000 条主跑与 57 条断点补跑记录仍然有参考价值，但现在已经降级为历史背景；当前后续流程应优先基于 **15000 条版本** 继续推进。
+
+---
+
+## 2. 当前有效的 step 04 主产物
+
+本轮完成后，当前推荐作为 step 04 主输入的文件是：
+
+- [data/interim/pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
+
+这是由：
+- 原有 `3000` 条 teacher 数据
+- 新增扩充 `12000` 条 teacher 数据
+
+合并得到的 **15000 条** 版本。
+
+相关中间产物：
+- 新增生成文件：[data/interim/pseudo_raw_plus_new.jsonl](../data/interim/pseudo_raw_plus_new.jsonl)
+- 合并产物原名：[data/interim/pseudo_raw_expanded.jsonl](../data/interim/pseudo_raw_expanded.jsonl)
+- 用户最终重命名后的主文件：[data/interim/pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
+
+---
+
+## 3. 本轮任务目标与采样策略
+
+这次扩充不是重新全量生成，而是：
+
+> 在保留已有 teacher 数据的前提下，把 `safe` 与 `unsafe` 都补齐到 `7500` 条；如果随机抽到已经做过 teacher 生成的样本，则直接跳过并复用旧结果。
+
+具体策略：
+- 输入训练集：[data/processed/train.jsonl](../data/processed/train.jsonl)
+- 旧 teacher 文件：`data/interim/pseudo_raw.jsonl`
+- 以 `id` 作为唯一去重键
+- 若 `id` 已存在于旧 teacher 文件，则视为已处理，直接跳过
+- 只对缺口样本调用 teacher
+- safe / unsafe 分别独立随机抽样补足到目标值
+- `sampling_seed = 42`
+
+扩充前的 teacher 覆盖量：
+- `safe = 1500`
+- `unsafe = 1500`
+
+本次新增需求：
+- `safe +6000`
+- `unsafe +6000`
+- 合计新增 `12000`
+
+dry run 结果确认：
+- 候选 `safe = 25109`
+- 候选 `unsafe = 6031`
+- 均可补足到目标
+- 已处理跳过 `3000` 条
+
+---
+
+## 4. 本轮使用的脚本与关键实现
+
+### 4.1 使用脚本
+
+原始 step 04 脚本：
 - [scripts/04_generate_rationale_pseudo.py](../scripts/04_generate_rationale_pseudo.py)
 
-本轮 step 04 已经完成：
-- prompt 模块化后的正式 teacher 生成
-- 3000 条 balanced sampling 正式产出
-- 一次 near-complete 中断后的断点补跑
-- `pseudo_raw.jsonl` 合并修复与解析补强
-- step 05 验证通过
+本轮新增的临时扩充脚本：
+- [scripts/04_plus_expand_teacher_targets.py](../scripts/04_plus_expand_teacher_targets.py)
+
+### 4.2 临时扩充脚本的职责
+
+`04_plus_expand_teacher_targets.py` 负责：
+- 读取旧 teacher 数据
+- 统计当前 safe/unsafe 数量
+- 计算 deficit
+- 从 `train.jsonl` 中筛选未处理样本
+- 先备份旧文件
+- 调用 teacher 生成新增样本
+- 将新增结果与旧结果按 `id` 合并
+
+### 4.3 本轮脚本关键行为
+
+- 默认目标：`target_safe = 7500`、`target_unsafe = 7500`
+- 默认跳过规则：只要 `id` 已存在于旧 teacher 文件，就不重复生成
+- 生成结果先写到单独文件，再合并到扩充文件
+- 保留 `teacher_raw_text` 与 `teacher_output`，便于 step 05 和后续审计
 
 ---
 
-## 2. 当前有效的 step 04 主路径
+## 5. 本轮环境与依赖修复结论
 
-当前 step 04 的推荐主路径是：
+这次扩充真正花时间排查的，不是数据逻辑，而是运行环境。
 
-- backend: `vLLM`
+### 5.1 第一个问题：旧版 vLLM 无法导入
+
+最初环境里：
+- `torch == 2.10.0+cu128`
+- `vllm == 0.2.5`
+
+会报：
+- `undefined symbol: _ZN3c104cuda9SetDeviceEi`
+
+结论：
+- 这是旧版 `vllm` 与当前 `torch/CUDA` 组合不兼容，不是脚本逻辑问题。
+
+### 5.2 第二个问题：锁文件把 vLLM 回滚到旧版本
+
+虽然一度临时升级了 vLLM，但因为项目锁文件仍锁着旧版：
+- [uv.lock](../uv.lock) 中原本仍是 `vllm==0.2.5`
+
+所以每次 `uv run` / `uv sync` 后环境又会被拉回旧版。
+
+### 5.3 第三个问题：新 vLLM 与 `transformers>=5` 冲突
+
+项目原本的依赖约束是：
+- [pyproject.toml:8-19](../pyproject.toml#L8-L19)
+
+其中曾写成：
+- `transformers>=5.2.0`
+- `vllm`
+
+但新版本 `vllm` 要求 `transformers<5`，因此锁文件无法正常解析。
+
+### 5.4 最终稳定下来的依赖组合
+
+本轮最终修复为：
+- `torch==2.10.0`
+- `transformers>=4.56.0,<5`
+- `vllm==0.18.0`
+
+当前这组依赖已经能支持本轮 step 04 扩充任务完整跑通。
+
+### 5.5 第四个问题：vLLM 编译/AOT 路径初始化失败
+
+在升级到 `vllm==0.18.0` 后，又遇到一次 engine 初始化失败，错误核心是：
+- `FakeTensorMode` 相关 AOT / compile backend 问题
+
+这不是模型文件坏，也不是数据坏，而是 vLLM 的编译路径在当前环境下不稳定。
+
+### 5.6 最终运行策略：关闭 compile，强制 eager
+
+为解决该问题，在扩充脚本里对 vLLM 初始化增加：
+- `enforce_eager=True`
+
+效果：
+- 禁用 torch.compile / CUDAGraph 相关路径
+- 换取更稳但更慢的 teacher 推理
+
+结论：
+- **当前项目中，Qwen3.5-27B teacher 扩充任务应优先使用 eager 模式保证稳定性。**
+
+---
+
+## 6. 本轮实际运行配置
+
+最终成功完成的关键配置如下：
+
 - teacher model: `Qwen/Qwen3.5-27B`
 - local model dir: `/root/project/learnTrainLLM/PretrainedModels/Qwen3.5-27B`
-- environment: 项目内统一使用 `uv run`
-- prompt source: 统一从 prompts 目录读取，而不是脚本内硬编码
-- thinking mode: `enable_thinking=False`
-- sampling: `3000` 条、`balanced`、`seed=42`
+- input: `data/processed/train.jsonl`
+- existing teacher file: `data/interim/pseudo_raw.jsonl`
+- generated new rows: `data/interim/pseudo_raw_plus_new.jsonl`
+- merged output: `data/interim/pseudo_raw_expanded.jsonl`
+- renamed final output: `data/interim/pseudo_raw_15000.jsonl`
+- target safe count: `7500`
+- target unsafe count: `7500`
+- sampling seed: `42`
+- batch size: `8`
+- max new tokens: `8192`
+- max model len: `8192`
+- temperature: `0.0`
+- gpu memory utilization: `0.9`
+- thinking mode: `False`
+- vLLM mode: `enforce_eager=True`
+- rerun tag: `expand_to_7500_per_label`
 
-关键 prompt 文件：
-- Teacher system prompt: [prompts/teacher_system.txt](../prompts/teacher_system.txt)
-- Teacher user prompt: [prompts/teacher_user.txt](../prompts/teacher_user.txt)
-
-这意味着后续如果要调整 teacher 行为，应该直接改上面两个 prompt 文件，而不是改 step 04 脚本里的字符串。
-
----
-
-## 3. 这轮实际采用的运行配置
-
-正式运行与补跑过程中，最终稳定下来的关键配置如下：
-
-- `teacher_model = Qwen/Qwen3.5-27B`
-- `teacher_model_dir = /root/project/learnTrainLLM/PretrainedModels/Qwen3.5-27B`
-- `input_path = data/processed/train.jsonl`
-- `output_path = data/interim/pseudo_raw.jsonl`
-- `max_samples = 3000`
-- `sampling_strategy = balanced`
-- `sampling_seed = 42`
-- `batch_size = 8`（正式主跑）
-- `max_new_tokens = 8192`
-- `max_model_len = 8192`
-- `temperature = 0.0`
-- `gpu_memory_utilization = 0.9`
-- `enable_thinking = False`
-
-断点补跑时：
-- 只补跑缺失的 `57` 条样本
-- 使用输入文件 [data/interim/pseudo_resume_57.jsonl](../data/interim/pseudo_resume_57.jsonl)
-- 输出文件 [data/interim/pseudo_resume_57_outputs.jsonl](../data/interim/pseudo_resume_57_outputs.jsonl)
-
-对应补跑日志：
-- [logs/step04_teacher_run_20260323_134051.jsonl](../logs/step04_teacher_run_20260323_134051.jsonl)
+提示：
+- 虽然 `max_new_tokens=8192` 保留了很宽松的上限，但 teacher 实际输出并没有这么长；这个配置主要是为了避免过早截断。
 
 ---
 
-## 4. 环境与依赖结论
+## 7. 本轮备份与安全措施
 
-这轮排查里，最重要的环境结论是：
+这次扩充前做了 teacher 文件备份。
 
-### 4.1 项目执行方式
+可确认的备份文件：
+- [backups/teacher_data/pseudo_raw_before_step04_plus_20260329_020458.jsonl](../backups/teacher_data/pseudo_raw_before_step04_plus_20260329_020458.jsonl)
+- [backups/teacher_data/pseudo_raw_before_step04_plus_20260329_052842.jsonl](../backups/teacher_data/pseudo_raw_before_step04_plus_20260329_052842.jsonl)
 
-本项目统一使用：
+第二个备份对应这次正式完成的主扩充运行。
 
-```bash
-uv run python ...
-```
-
-不要再默认直接用 `python` 或系统解释器执行项目脚本。
-
-### 4.2 vLLM 版本结论
-
-之前的 `vllm==0.18.0` 在当前环境下运行 step 04 出现兼容性问题，后来切换为：
-
-- `vllm==0.17.1`
-- `torch==2.10.0`
-- `requires-python = ">=3.10,<3.12"`
-
-当前 [pyproject.toml](../pyproject.toml) 中这组组合已经可以支持 step 04 用 vLLM 正常推理。
+这意味着：
+- 即使后续 step 05 / 06 实验需要回滚，也仍然保留了扩充前的旧 3000 条版本。
 
 ---
 
-## 5. 本轮最重要的运行事件
+## 8. 本轮最终结果
 
-## 5.1 正式主跑并未一次性顺利结束
+任务最终成功完成。
 
-这轮 3000 条正式运行并不是一次完成的。
+### 8.1 新增样本数
 
-第一次主跑在接近完成时中断，最终只写出了：
+新增生成：
+- `safe = 6000`
+- `unsafe = 6000`
+- 合计 `12000`
 
-- `2943` 条已保存样本
-- 目标应为 `3000` 条
-- 因此缺失 `57` 条
+### 8.2 合并后总量
 
-当时的部分输出文件是：
-- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
+扩充前旧 teacher 数据：
+- `3000`
 
-## 5.2 中断时曾出现残留 vLLM 进程
+新增：
+- `12000`
 
-排查中发现有残留的 `VLLM::EngineCore` 进程，需要手动清理。
+合并后：
+- `15000`
 
-清理后确认：
-- GPU 1 已基本释放，仅剩约 `14 MiB`
-- 本次补跑可以继续使用 GPU 1
+### 8.3 最终标签分布
 
-这个结论很重要，因为说明“接近完成时中断”后，**vLLM 子进程可能仍然残留**，需要显式检查，而不是只看父任务是否结束。
+最终达成：
+- `safe = 7500`
+- `unsafe = 7500`
 
-## 5.3 正确的进度检查方式
+也就是说，本轮的目标已经被**完整满足**，不存在 shortfall。
 
-这轮还确认了一个流程性问题：
+### 8.4 合并信息
 
-- 不能只靠任务状态缓存判断长任务进度
-- 应优先看真实输出文件或真实任务输出日志
+合并摘要：
+- base_count = `3000`
+- rerun_count = `12000`
+- replaced = `0`
+- appended = `12000`
+- merged_total = `15000`
 
-后续再看 step 04 / 08 这类长任务时，应优先基于真实输出增量来判断，而不是依赖可能滞后的任务摘要。
+说明：
+- 本轮没有覆盖旧样本，而是完全追加了新的未处理样本。
 
----
+### 8.5 文件行数校验
 
-## 6. 本轮发现的核心数据问题
+已核对：
+- [pseudo_raw_plus_new.jsonl](../data/interim/pseudo_raw_plus_new.jsonl) = `12000` 行
+- [pseudo_raw_expanded.jsonl](../data/interim/pseudo_raw_expanded.jsonl) = `15000` 行
 
-这次最关键的新发现不是 parse failure，而是：
+用户后续将扩充结果重命名为：
+- [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
 
-> teacher 经常返回了 `reason` 和 `evidence`，但漏掉了 `label` 字段。
-
-也就是说，旧版记录里“3000 / 3000 成功解析”这个说法已经不够准确，因为：
-
-- 很多样本的 `teacher_raw_text` 可读
-- `teacher_output` 也有部分结构
-- 但 `label` 并不完整
-- 少数样本甚至不是标准 JSON，而是 `reason + Evidence:` 文本格式
-
-如果不修，这会直接影响 step 05 的 label consistency 检查。
-
----
-
-## 7. 本轮做出的脚本修复
-
-为解决上面的问题，step 04 脚本已经做了两类补强。
-
-### 7.1 对缺失 label 的自动回填
-
-位置：
-- [scripts/04_generate_rationale_pseudo.py:75-88](../scripts/04_generate_rationale_pseudo.py#L75-L88)
-
-当前逻辑：
-1. 如果 teacher JSON 已有 `label`，直接保留
-2. 如果 `reason` 里能匹配出 `response is safe/unsafe`，则从 reason 中恢复 label
-3. 否则退回使用样本自身的 gold binary `label`
-
-这能解决“teacher 输出 JSON 结构不完整，但主判断方向其实很明确”的情况。
-
-### 7.2 对非标准 JSON 文本的 fallback 解析
-
-位置：
-- [scripts/04_generate_rationale_pseudo.py:57-73](../scripts/04_generate_rationale_pseudo.py#L57-L73)
-
-当前逻辑除了提取标准 JSON 外，也支持解析类似下面这种 teacher 输出：
-
-```text
-The response is safe because ...
-
-Evidence:
-1. "..."
-2. "..."
-```
-
-也就是说，step 04 不再只接受严格 JSON，而是能从一部分“可恢复的自然文本”中抽出：
-- `reason`
-- `evidence`
-- 然后再补 `label`
-
-这对后续 rerun 的稳定性很重要。
+因此后续建议统一用 `pseudo_raw_15000.jsonl` 作为新的主产物引用名。
 
 ---
 
-## 8. 本轮断点补跑与合并结果
+## 9. 本轮运行时长与性能结论
 
-### 8.1 补跑范围
+本次正式扩充任务的总运行时长：
+- `50891.981` 秒
+- 约 **14.14 小时**
 
-按照原始 `3000` 条 balanced sampling + `seed=42` 的目标采样集重新比对后，确认：
+原因主要有三点：
+1. 使用的是 `Qwen3.5-27B`
+2. 使用 eager 模式以换取稳定性
+3. batch size 仅为 `8`
 
-- 已有样本：`2943`
-- 缺失样本：`57`
-- 没有“多跑到别的样本”的问题
+从工程角度看：
+- 这组配置**可跑通**
+- 但并不算快
+- 如果后续要继续大规模 teacher 扩充，需要把“稳定”和“速度”作为单独优化议题处理，而不能默认当前配置已经是速度最优解
 
-也就是说，旧的 `pseudo_raw.jsonl` 与目标采样集是一致的，只是少了最后 `57` 条。
-
-### 8.2 补跑结果
-
-补跑任务成功完成：
-
-- `57 / 57` 全部跑完
-- 补跑输出内 `teacher_output.label` 缺失数 = `0`
-
-补跑产物：
-- [data/interim/pseudo_resume_57_outputs.jsonl](../data/interim/pseudo_resume_57_outputs.jsonl)
-
-### 8.3 合并后的最终结果
-
-补跑结果已合并回主文件，并做过额外修复。
-
-最终主文件：
-- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
-
-最终校验结果：
-- 总行数：`3000`
-- 唯一 ID 数：`3000`
-- duplicate：`0`
-- `teacher_output.label` 缺失：`0`
-- 与目标 3000 条采样集完全一致
-
-为防止误操作，还保留了两个安全备份：
-- [data/interim/pseudo_raw.before_resume_merge.jsonl](../data/interim/pseudo_raw.before_resume_merge.jsonl)
-- [data/interim/pseudo_raw.before_label_backfill.jsonl](../data/interim/pseudo_raw.before_label_backfill.jsonl)
+当前结论是：
+- **该配置适合保证一次性跑通，不适合作为高吞吐长期生产配置。**
 
 ---
 
-## 9. 用 step 05 做的验证结果
+## 10. 对 step 05 / step 06 的直接影响
 
-合并修复完成后，已重新运行 step 05 做一致性验证：
+### 10.1 Step 05
 
-```json
-{
-  "input": 3000,
-  "kept": 1961,
-  "dropped": 1039,
-  "drop_reasons": {
-    "evidence_not_grounded": 847,
-    "reason_length_out_of_range": 185,
-    "refusal_style_reason": 6,
-    "missing_evidence": 1
-  },
-  "label_mismatch_saved": 0
-}
-```
+现在 step 05 建议优先使用：
+- [data/interim/pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
 
-校验产物：
-- [data/processed/pseudo_filtered_resume_check.jsonl](../data/processed/pseudo_filtered_resume_check.jsonl)
-- [data/processed/pseudo_label_mismatch_resume_check.jsonl](../data/processed/pseudo_label_mismatch_resume_check.jsonl)
+而不是旧的 3000 条版本。
 
-这里最重要的不是 kept 数本身，而是：
+这将直接扩大：
+- step 05 的输入规模
+- 后续 step 06 SFT 数据池上限
 
-> `label_mismatch_saved = 0`
+### 10.2 Step 06
 
-这说明经过补跑、合并、label 回填和 fallback 解析后，当前 step 04 产物已经能稳定进入 step 05，不再存在成批 teacher/gold label 不一致的问题。
+如果 step 05 的过滤率与之前同量级，那么：
+- 15000 条 teacher 数据应明显提高最终可进入 SFT 的样本量
+
+但仍要注意：
+- teacher 数量变大不等于最终高质量样本线性增加
+- 真正可用比例仍取决于 step 05 的 grounding、reason length、label consistency 等过滤结果
+
+因此最合理的后续动作是：
+1. 基于 `pseudo_raw_15000.jsonl` 运行 step 05
+2. 看真实 kept / dropped / drop reasons
+3. 再决定是否需要继续 rerun 某些 drop subset 或进一步改 prompt
 
 ---
 
-## 10. 当前对 step 04 的有效结论
+## 11. 与旧 3000 条版本的关系
 
-截至本轮，step 04 的有效结论如下：
+旧版本并没有失效，只是角色变化了：
+- 旧的 `pseudo_raw.jsonl`：现在更像是“首次正式 teacher 运行的历史版本”
+- 新的 `pseudo_raw_15000.jsonl`：现在是“后续实验优先使用的当前主版本”
 
-### 10.1 工程结论
+因此后续文档、脚本和实验记录里，如果没有特别说明，建议默认引用：
+- [data/interim/pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
 
-- step 04 已不应再把 prompt 写死在脚本里
-- teacher prompt 应统一从 prompt 文件读取
+---
+
+## 12. 当前对 step 04 的有效结论
+
+截至本轮，step 04 的最新有效结论如下：
+
+### 工程结论
+
 - 项目执行统一使用 `uv run`
-- 当前可用的 vLLM 组合是 `vllm==0.17.1 + torch==2.10.0`
+- `Qwen/Qwen3.5-27B` 仍是当前 teacher 主路径
+- 对大规模扩充，新增临时脚本 [04_plus_expand_teacher_targets.py](../scripts/04_plus_expand_teacher_targets.py) 是有效工具
+- 当前稳定依赖组合是：
+  - `torch==2.10.0`
+  - `transformers>=4.56.0,<5`
+  - `vllm==0.18.0`
+- 当前稳定运行模式是：
+  - `enforce_eager=True`
 
-### 10.2 运行结论
+### 数据结论
 
-- `Qwen/Qwen3.5-27B + vLLM + enable_thinking=False` 仍然是当前 teacher 主路径
-- `3000` 条 balanced sampling 方案是成立的
-- 断点补跑是可行的，而且可以严格补齐到原目标采样集
+- teacher 数据已经成功从 `3000` 扩充到 `15000`
+- 最终标签分布严格平衡：`7500 / 7500`
+- 旧样本通过 `id` 复用，没有重复 teacher 调用
+- 本轮新增数据与旧数据可按 `id` 安全合并
 
-### 10.3 数据结论
+### 流程结论
 
-- teacher 输出并不总是严格 JSON
-- 不能再假设“parsed_ok 就一定字段完整”
-- `label` 缺失是本轮真实暴露出来的主要数据问题
-- 需要保留 `teacher_raw_text`，因为它对恢复结构化字段和后续审计都很重要
-
----
-
-## 11. 对后续步骤的直接影响
-
-### Step 05
-
-现在可以基于当前的 [pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl) 正式重跑 step 05。
-
-### Step 06
-
-step 06 之后的训练数据会更依赖 step 05 的过滤结果，因此这轮 step 04 修复实际上是在保证后续 structured SFT 数据质量。
-
-### 后续 rerun
-
-如果后续再改 teacher prompt，应从 step 04 重新开始跑。
+- “先 dry run → 再备份 → 再正式生成 → 再合并” 这条流程已验证有效
+- 对长任务，应该优先看真实输出日志与真实文件行数，而不是只看任务摘要
+- 对大模型 vLLM 推理，稳定性问题通常优先从依赖版本与运行模式入手排查
 
 ---
 
-## 12. 一句话总结
+## 13. 后续建议
 
-这轮 step 04 最重要的结论不是“3000 条跑完了”，而是：
+推荐下一步按下面顺序推进：
 
-> 当前 `judge-mvp` 的 teacher 生成主路径已经升级为一个可恢复、可补跑、可审计的流程：使用 `Qwen/Qwen3.5-27B + vLLM + enable_thinking=False` 生成 3000 条 balanced pseudo labels，即使主跑在 2943/3000 处中断，也已经通过补跑 57 条、合并、label 回填与 fallback 解析，将 [pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl) 修复到可直接进入 step 05 的稳定状态。
+1. 基于 [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl) 正式运行 step 05
+2. 统计：
+   - kept 总数
+   - drop reasons
+   - safe/unsafe 保留分布
+3. 如果过滤后仍觉得样本量不足，再考虑：
+   - 对 step 05 dropped subset 定向 rerun
+   - 调整 teacher prompt
+   - 或进一步优化生成吞吐
+
+---
+
+## 14. 一句话总结
+
+当前 `judge-mvp` 的 step 04 已经从“3000 条 teacher 主跑 + 断点补跑”升级为一个更完整的扩充版本：
+
+> 使用 `Qwen/Qwen3.5-27B + vLLM 0.18.0 + eager mode`，在跳过已处理样本的前提下，将 teacher 数据成功扩充到 [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)，最终达到 `safe=7500`、`unsafe=7500` 的平衡规模，并保留了完整备份与中间产物，可直接作为后续 step 05 的主输入。

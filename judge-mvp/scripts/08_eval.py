@@ -2,7 +2,7 @@
 """Unified step-08 entry point for generation and single-file evaluation.
 
 Pipeline step:
-    08 / 08
+    08 / 09
 
 Goal:
     Keep step 08 as the only entry point for:
@@ -28,10 +28,11 @@ import json
 import os
 import time
 from pathlib import Path
-
 from _common import choose_idle_gpu
 from _eval_common import evaluate_prediction_file, read_jsonl, validate_reference_rows, write_json
 from _prompts import load_named_prompt_bundle, load_prompt_bundle, render_user_prompt
+from tqdm.auto import tqdm
+
 
 DEFAULT_MODEL_PATH = Path("/root/project/PretrainedModels/Qwen/Qwen3.5-4B")
 DEFAULT_MODEL_NAME = str(DEFAULT_MODEL_PATH)
@@ -123,7 +124,6 @@ def build_messages(row: dict, prompt_bundle) -> list[dict]:
                 prompt_bundle.user,
                 question=row["question"],
                 response=row["response"],
-                label=row.get("label", ""),
             ),
         },
     ]
@@ -230,56 +230,67 @@ def stream_with_transformers(job: dict, rows: list[dict], prompt_bundle, writer,
     if job["temperature"] > 0:
         generation_kwargs["temperature"] = job["temperature"]
 
-    for batch_index, batch_rows in enumerate(batched(rows, job["transformers_batch_size"]), start=1):
-        rendered_prompts = [
-            tokenizer.apply_chat_template(
-                build_messages(row, prompt_bundle),
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-            for row in batch_rows
-        ]
-        inputs = tokenizer(rendered_prompts, return_tensors="pt", padding=True).to(device)
-        prompt_lengths = inputs["attention_mask"].sum(dim=1).tolist()
-        with torch.no_grad():
-            generated = model.generate(**inputs, **generation_kwargs)
+    with tqdm(
+        total=total,
+        initial=already_done,
+        desc=f"{job['variant_name']} generation",
+        unit="sample",
+        dynamic_ncols=True,
+    ) as progress_bar:
+        for batch_index, batch_rows in enumerate(batched(rows, job["transformers_batch_size"]), start=1):
+            rendered_prompts = [
+                tokenizer.apply_chat_template(
+                    build_messages(row, prompt_bundle),
+                    tokenize=False,
+                    add_generation_prompt=True,
+                    enable_thinking=False,
+                )
+                for row in batch_rows
+            ]
+            inputs = tokenizer(rendered_prompts, return_tensors="pt", padding=True).to(device)
+            padded_prompt_length = inputs["input_ids"].shape[1]  # 所有样本统一的 padded 长度
+            with torch.no_grad():
+                generated = model.generate(**inputs, **generation_kwargs)
 
-        for row, prompt_length, generated_ids in zip(batch_rows, prompt_lengths, generated):
-            generated_text = tokenizer.decode(generated_ids[int(prompt_length) :], skip_special_tokens=True).strip()
-            writer.write(json.dumps(build_record(row, generated_text), ensure_ascii=False) + "\n")
-            done += 1
+            for row, generated_ids in zip(batch_rows, generated):
+                # 直接用 padded_prompt_length 切掉输入部分
+                generated_text = tokenizer.decode(
+                    generated_ids[padded_prompt_length:], skip_special_tokens=True
+                ).strip()
+                writer.write(json.dumps(build_record(row, generated_text), ensure_ascii=False) + "\n")
+                done += 1
+                progress_bar.update(1)
 
-        writer.flush()
-        if done == 1 or done % job["log_every"] == 0 or done == total:
-            log_progress(
-                event="generation_progress",
-                done=done,
-                total=total,
-                start_time=start_time,
-                output_file=job["output_file"],
-                extra={"variant": job["variant_name"], "batch_index": batch_index},
-            )
+            writer.flush()
+            if done == 1 or done % job["log_every"] == 0 or done == total:
+                log_progress(
+                    event="generation_progress",
+                    done=done,
+                    total=total,
+                    start_time=start_time,
+                    output_file=job["output_file"],
+                    extra={"variant": job["variant_name"], "batch_index": batch_index},
+                )
     return done
 
 
 def add_generation_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", choices=("base", "lora", "both"), required=True)
-    parser.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME)
-    parser.add_argument("--test_file", type=Path, default=DEFAULT_TEST_FILE)
-    parser.add_argument("--main_system_prompt", type=Path, default=None)
-    parser.add_argument("--main_user_prompt", type=Path, default=None)
-    parser.add_argument("--adapter_path", type=Path, default=None)
+    parser.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME, help="Hugging Face model name or path for the base Qwen3.5 model.")
+    parser.add_argument("--test_file", type=Path, default=DEFAULT_TEST_FILE, help="Path to the test split JSONL file containing question/response pairs and labels.")
+    parser.add_argument("--main_system_prompt", type=Path, default=None, help="Path to a custom system prompt text file. If not provided, will use adapter_path prompts or default main prompts.")
+    parser.add_argument("--main_user_prompt", type=Path, default=None, help="Path to a custom user prompt text file. If not provided, will use adapter_path prompts or default main prompts.")
+    parser.add_argument("--adapter_path", type=Path, default=None, help="Path to the LoRA adapter weights.")
     parser.add_argument("--output_file", type=Path, default=None, help="Prediction output path for single-variant mode.")
     parser.add_argument("--base_output_file", type=Path, default=DEFAULT_BASE_OUTPUT_FILE)
     parser.add_argument("--lora_output_file", type=Path, default=DEFAULT_LORA_OUTPUT_FILE)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--max_new_tokens", type=int, default=256)
+    parser.add_argument("--max_new_tokens", type=int, default=4096)
     parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--gpu_id", type=int, default=None)
+    parser.add_argument("--gpu_id", type=int, default=None, help="GPU ID to use for generation. If not specified, will attempt to auto-select an idle GPU or fall back to CPU.")
     parser.add_argument("--log_every", type=int, default=50)
-    parser.add_argument("--transformers_batch_size", type=int, default=8)
+    parser.add_argument("--transformers_batch_size", type=int, default=32, help="Batch size for transformers generation.")
 
 
 def add_evaluation_args(parser: argparse.ArgumentParser) -> None:
