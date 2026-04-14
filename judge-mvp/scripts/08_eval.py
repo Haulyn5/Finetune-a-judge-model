@@ -34,8 +34,7 @@ from _prompts import load_named_prompt_bundle, load_prompt_bundle, render_user_p
 from tqdm.auto import tqdm
 
 
-DEFAULT_MODEL_PATH = Path("/root/project/PretrainedModels/Qwen/Qwen3.5-4B")
-DEFAULT_MODEL_NAME = str(DEFAULT_MODEL_PATH)
+DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-4B"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_FILE = ROOT / "data" / "processed" / "test.jsonl"
 DEFAULT_REFERENCE_FILE = ROOT / "data" / "processed" / "test.jsonl"

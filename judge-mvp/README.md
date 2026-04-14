@@ -290,7 +290,24 @@ uv run python scripts/07_train_sft_lora.py \
 
 输出：
 - adapter: `outputs/sft_lora/`
-- 推理模板: `outputs/sft_lora/prompt_template.txt`
+- 推理模板: `outputs/sft_lora/main_system.txt`
+- 推理模板: `outputs/sft_lora/main_user.txt`
+
+如果你使用的是 15000 条版本数据，推荐直接运行：
+
+```bash
+uv run python scripts/07_train_sft_lora.py \
+  --train_file data/processed/sft_train_15000.jsonl \
+  --eval_file data/processed/sft_dev_15000.jsonl \
+  --output_dir outputs/sft_lora_15000 \
+  --tensorboard_run_name step07_sft_lora_15000 \
+  --num_train_epochs 3 \
+  --per_device_train_batch_size 4 \
+  --per_device_eval_batch_size 2 \
+  --gradient_accumulation_steps 8 \
+  --learning_rate 1e-4 \
+  --max_seq_length 2048
+```
 
 默认使用 LoRA。若环境支持 bitsandbytes，可加：
 
@@ -298,14 +315,66 @@ uv run python scripts/07_train_sft_lora.py \
 uv run python scripts/07_train_sft_lora.py --load_in_4bit
 ```
 
+#### TensorBoard 监控
+
+step 07 脚本已内置 TensorBoard 上报：
+- [scripts/07_train_sft_lora.py:297](scripts/07_train_sft_lora.py#L297)
+
+可另开终端启动：
+
+```bash
+uv run tensorboard --logdir outputs/sft_lora_15000/runs --host 0.0.0.0 --port 6006
+```
+
+如果 `6006` 已被占用，可换一个空闲端口，例如：
+
+```bash
+uv run tensorboard --logdir outputs/sft_lora_15000/runs --host 0.0.0.0 --port 43355
+```
+
+#### 当前已知环境冲突：step 04 与 step 07 对 Transformers 的要求不同
+
+这里有一个实际跑通中暴露出来的重要兼容性问题：
+
+1. **step 04 / vLLM teacher 路径**
+   - `Qwen/Qwen3.5-27B` 的 vLLM 推理路径更依赖 `vllm` 与 `transformers` 的兼容性
+   - 之前为排查 step 04 扩充运行，项目曾临时收紧到 `transformers<5`，以便先把 teacher 扩充跑通
+   - teacher 扩充脚本还通过 `enforce_eager=True` 规避了 vLLM 编译/AOT 初始化问题
+
+2. **step 07 / Qwen3.5-4B 训练路径**
+   - 如果基座模型的 `config.json` 中：
+     - `model_type = "qwen3_5"`
+   - `transformers==4.57.6` 无法识别这个架构，训练会报：
+     - `KeyError: 'qwen3_5'`
+     - `Transformers does not recognize this architecture`
+
+3. **当前推荐修复方案**
+   - 直接把项目依赖中的 Transformers 要求恢复到：
+
+```toml
+transformers>=5.2.0
+```
+
+   - 然后执行：
+
+```bash
+uv lock
+uv sync
+```
+
+   - 同步后再使用正常的 `uv run` 启动 step 07。
+
+4. **当前项目的实际建议**
+   - 如果当前重点是 step 07 / 08，优先保证训练环境能加载 `Qwen3.5-4B`
+   - 如果之后还要重新跑 step 04 的 vLLM teacher 扩充，再重新检查 `vllm` 与当前 `transformers` 的兼容性
+   - 更稳妥的长期方案是把 teacher 推理环境和主模型训练环境拆开，但当前仓库还没有正式做环境隔离
+
 参数理解：
 - 默认主模型是 **Qwen 4B 级**，不是 baseline 小模型
-- 默认 `per_device_train_batch_size=1 + gradient_accumulation_steps=8`
-  是为了让脚本在学习阶段更稳妥，也更接近大模型常见训练方式
+- 默认 `per_device_train_batch_size=4 + gradient_accumulation_steps=8`
+  适合当前 15000 条版本训练配置
 - 在 **A100 80GB** 上，`bf16` 往往是首选；脚本会在可用时优先启用
-- step 04 的 teacher 生成路径当前固定使用 vLLM + `bf16`，因此建议在支持 bf16 的 GPU 环境中运行
-- `max_seq_length=1024` 是一个便于起步的默认值，通常足以覆盖
-  question/response 加结构化输出
+- `max_seq_length=2048` 适合当前 question/response + 结构化输出长度
 - `target_modules` 指的是 transformer 中主要投影层，是 LoRA 的常见注入位置
 
 ---
