@@ -15,7 +15,7 @@ import argparse
 import json
 from pathlib import Path
 
-from _eval_common import FLAT_METRIC_ORDER, VALID_LABELS, evaluate_prediction_file, read_jsonl, validate_reference_rows, write_json
+from _eval_common import VALID_LABELS, evaluate_prediction_file, read_jsonl, validate_reference_rows, write_json
 
 PAIRWISE_ORDER = [
     ("qwen_base", "baseline", "qwen_base_minus_baseline"),
@@ -24,6 +24,18 @@ PAIRWISE_ORDER = [
 ]
 MODEL_ORDER = ("baseline", "qwen_base", "qwen_lora")
 JSON_ANALYSIS_MODELS = ("qwen_base", "qwen_lora")
+STEP09_METRIC_ORDER = [
+    "accuracy",
+    "macro_f1",
+    "unsafe_precision",
+    "unsafe_recall",
+    "unsafe_f1",
+    "raw_json_parse_success_rate",
+    "raw_json_parse_failure_rate",
+    "fallback_usable_rate",
+    "evidence_hit_rate",
+    "reason_label_consistency",
+]
 
 
 def safe_json_loads(text) -> dict | None:
@@ -89,7 +101,7 @@ def compute_pairwise_delta(results: dict) -> dict:
             continue
         deltas[delta_name] = {
             metric: results[left_name]["flat_metrics"][metric] - results[right_name]["flat_metrics"][metric]
-            for metric in FLAT_METRIC_ORDER
+            for metric in STEP09_METRIC_ORDER
         }
     return deltas
 
@@ -101,7 +113,6 @@ def rank_models(results: dict) -> dict:
         "unsafe_precision": True,
         "unsafe_recall": True,
         "unsafe_f1": True,
-        "overblock_rate": False,
         "raw_json_parse_success_rate": True,
         "raw_json_parse_failure_rate": False,
         "fallback_usable_rate": True,
@@ -141,7 +152,7 @@ def build_takeaways(pairwise_delta: dict, ranking: dict, json_parse_analysis: di
         if not delta:
             continue
         takeaways.append(
-            f"{delta_name}: macro_f1 {delta['macro_f1']:+.4f}, unsafe_f1 {delta['unsafe_f1']:+.4f}, overblock_rate {delta['overblock_rate']:+.4f}."
+            f"{delta_name}: macro_f1 {delta['macro_f1']:+.4f}, unsafe_f1 {delta['unsafe_f1']:+.4f}."
         )
     return takeaways
 
@@ -161,11 +172,11 @@ def build_markdown(
         lines.append(f"- {model_name}: `{input_files[model_name]}`")
 
     lines.extend(["", "## Metrics", ""])
-    lines.append("| Model | " + " | ".join(FLAT_METRIC_ORDER) + " |")
-    lines.append("| --- | " + " | ".join(["---"] * len(FLAT_METRIC_ORDER)) + " |")
+    lines.append("| Model | " + " | ".join(STEP09_METRIC_ORDER) + " |")
+    lines.append("| --- | " + " | ".join(["---"] * len(STEP09_METRIC_ORDER)) + " |")
     for model_name in MODEL_ORDER:
         metrics = results[model_name]["flat_metrics"]
-        values = [f"{metrics[key]:.4f}" for key in FLAT_METRIC_ORDER]
+        values = [f"{metrics[key]:.4f}" for key in STEP09_METRIC_ORDER]
         lines.append("| " + model_name + " | " + " | ".join(values) + " |")
 
     if json_parse_analysis:
@@ -223,12 +234,12 @@ def build_markdown(
         for delta_name, delta_values in pairwise_delta.items():
             lines.append(f"### {delta_name}")
             lines.append("")
-            for metric in FLAT_METRIC_ORDER:
+            for metric in STEP09_METRIC_ORDER:
                 lines.append(f"- `{metric}`: {delta_values[metric]:+.4f}")
             lines.append("")
 
     lines.extend(["## Best Model by Metric", ""])
-    for metric in FLAT_METRIC_ORDER:
+    for metric in STEP09_METRIC_ORDER:
         best_model, best_value = ranking[metric][0]
         lines.append(f"- `{metric}`: **{best_model}** ({best_value:.4f})")
 

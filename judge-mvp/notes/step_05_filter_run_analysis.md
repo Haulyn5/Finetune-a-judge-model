@@ -1,376 +1,361 @@
-# Step 05 运行记录：正式过滤结果与丢弃原因分析
+# Step 05 运行记录：15000 条 teacher 数据过滤结果（当前主版本）
 
-## 1. 这份记录的定位
+## 1. 本文定位
 
-这份笔记覆盖旧版 step 05 记录，只保留当前这轮正式运行后仍然有效的信息。
+这份笔记以**最新完成且当前有效**的 step 05 结果为主，记录基于 15000 条 teacher 数据的正式过滤输出、关键统计、主要丢弃原因，以及对后续 step 06 / rerun 的直接意义。
+
+旧的 3000 条版本记录仍然有参考价值，但现在已经降级为历史背景。当前后续训练与分析应优先基于：
+- [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl)
+
+---
+
+## 2. 本轮输入与输出
+
+本轮 step 05 使用的输入是：
+- [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)
+
+这是 step 04 扩充后的主 teacher 文件，规模为：
+- `15000` 条
+- 标签目标来自 step 04 扩充结果：`safe=7500`、`unsafe=7500`
+
+为避免覆盖旧版 step 05 结果，这次输出写到了新的文件名：
+
+- 主过滤结果： [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl)
+- label mismatch 子集： [pseudo_label_mismatch_15000.jsonl](../data/processed/pseudo_label_mismatch_15000.jsonl)
+- 全部 dropped 子集： [pseudo_dropped_15000.jsonl](../data/interim/pseudo_dropped_15000.jsonl)
+
+这些文件都已经存在，可继续直接供后续步骤使用。
+
+---
+
+## 3. 本轮执行命令
+
+本轮实际执行命令是：
+
+```bash
+uv run python scripts/05_filter_pseudo_labels.py \
+  --input_path data/interim/pseudo_raw_15000.jsonl \
+  --output_path data/processed/pseudo_filtered_15000.jsonl \
+  --label_mismatch_output_path data/processed/pseudo_label_mismatch_15000.jsonl \
+  --dropped_output_path data/interim/pseudo_dropped_15000.jsonl
+```
 
 对应脚本：
 - [scripts/05_filter_pseudo_labels.py](../scripts/05_filter_pseudo_labels.py)
 
-本轮 step 05 的输入，已经基于最新修复后的 step 04 产物：
-- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
+---
 
-也就是说，这份分析建立在以下前提上：
-- step 04 已补齐到 `3000 / 3000`
-- `teacher_output.label` 缺失已修复为 `0`
-- 当前输入是 3000 条 balanced pseudo labels
+## 4. step 05 当前到底在过滤什么
+
+当前 step 05 的核心逻辑没有变，仍然是对每条 step 04 teacher 输出做结构与一致性过滤。
+
+关键逻辑位置：
+- [scripts/05_filter_pseudo_labels.py:49-74](../scripts/05_filter_pseudo_labels.py#L49-L74)
+- [scripts/05_filter_pseudo_labels.py:91-167](../scripts/05_filter_pseudo_labels.py#L91-L167)
+
+每条样本会依次检查：
+
+1. `teacher_output.label` 是否与原样本 `label` 一致
+2. `evidence` 是否存在且至少 1 条
+3. 每条 `evidence` 是否都能在 `question + response` 中做**严格子串匹配**
+4. `reason` 长度是否位于 `[20, 400]`
+
+只要任意一步失败，这条样本就不会进入最终的主训练集。
+
+其中最严格、也是本轮最大的过滤来源，仍然是：
+- `evidence_not_grounded`
+
+因为这里要求 evidence 是原文中的**逐字片段**，不接受意译、概括、重写后的引用。
 
 ---
 
-## 2. 本轮正式运行命令与输出
+## 5. 本轮最终统计结果
 
-正式运行命令：
-
-```bash
-uv run python scripts/05_filter_pseudo_labels.py
-```
-
-输入文件：
-- [data/interim/pseudo_raw.jsonl](../data/interim/pseudo_raw.jsonl)
-
-输出文件：
-- 主过滤结果: [data/processed/pseudo_filtered.jsonl](../data/processed/pseudo_filtered.jsonl)
-- label mismatch 保存文件: [data/processed/pseudo_label_mismatch.jsonl](../data/processed/pseudo_label_mismatch.jsonl)
-
-本轮正式运行统计：
+本轮 step 05 输出统计如下：
 
 ```json
 {
-  "input": 3000,
-  "kept": 1961,
-  "dropped": 1039,
+  "input": 15000,
+  "kept": 11626,
+  "dropped": 3374,
   "drop_reasons": {
-    "evidence_not_grounded": 847,
-    "reason_length_out_of_range": 185,
-    "refusal_style_reason": 6,
-    "missing_evidence": 1
+    "evidence_not_grounded": 2160,
+    "reason_length_out_of_range": 841,
+    "label_mismatch": 373
   },
   "kept_label_counts": {
-    "safe": 1206,
-    "unsafe": 755
+    "safe": 6489,
+    "unsafe": 5137
   },
-  "label_mismatch_saved": 0
+  "label_mismatch_saved": 373
 }
 ```
 
----
+额外行数校验：
+- [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl): `11626` 行
+- [pseudo_label_mismatch_15000.jsonl](../data/processed/pseudo_label_mismatch_15000.jsonl): `373` 行
+- [pseudo_dropped_15000.jsonl](../data/interim/pseudo_dropped_15000.jsonl): `3374` 行
 
-## 3. step 05 当前到底在过滤什么
+### 核心结论
 
-当前 step 05 的核心过滤逻辑在：
-- [scripts/05_filter_pseudo_labels.py:72-105](../scripts/05_filter_pseudo_labels.py#L72-L105)
+- 总输入：`15000`
+- 保留：`11626`
+- 丢弃：`3374`
+- 整体保留率：**77.51%**
 
-它对每条 step 04 teacher 输出依次检查：
-
-1. `teacher label` 是否等于原样本 `gold label`
-2. `evidence` 是否存在且为非空列表
-3. `evidence` 中每一项是否都能在 `question + response` 中做**严格子串匹配**
-4. `reason` 长度是否位于 `[20, 400]`
-
-只要某一步失败，该样本就不会进入主训练集。
-
-其中最严格的一步是 evidence grounding：
-- grounding 函数: [scripts/05_filter_pseudo_labels.py:48-55](../scripts/05_filter_pseudo_labels.py#L48-L55)
-- 它要求 evidence 必须是原文本中的逐字片段，不接受意译或近似引用
+这说明：
+- 15000 条 step 04 teacher 数据中，已有相当大比例满足当前 strict filter
+- 对 MVP 训练来说，这已经是一个明显更强的数据基座
 
 ---
 
-## 4. 输入分布与过滤后分布
+## 6. 输入分布与过滤后分布
 
-本轮 step 04 输入本来是严格平衡的：
+step 04 扩充完成后，输入是严格平衡的：
+- safe: `7500`
+- unsafe: `7500`
 
-- safe: `1500`
-- unsafe: `1500`
+### 过滤后保留分布
 
-过滤后保留下来的分布：
+- safe kept: `6489`
+- unsafe kept: `5137`
 
-- safe kept: `1206`
-- unsafe kept: `755`
+### dropped 分布
 
-过滤后被丢弃的分布：
+从 `pseudo_dropped_15000.jsonl` 统计得到：
+- safe dropped: `1011`
+- unsafe dropped: `2363`
 
-- safe dropped: `294`
-- unsafe dropped: `745`
+### 按类别保留率
 
-按类别保留率：
-
-- safe keep rate: `80.4%`
-- unsafe keep rate: `50.33%`
+- safe keep rate: `6489 / 7500 = 86.52%`
+- unsafe keep rate: `5137 / 7500 = 68.49%`
 
 这说明一个非常明确的现象：
 
-> 当前 step 05 对 unsafe 样本更“苛刻”，unsafe 类样本更容易被过滤掉。
+> 即使 step 04 输入已经做到 7500 / 7500 平衡，step 05 之后仍然显著偏向 safe；unsafe 样本更容易在过滤中被淘汰。
 
-原因并不是 unsafe label 本身有问题，而是 unsafe 响应更容易触发：
-- evidence 不够逐字 grounded
-- reason 过长
-- 解释过度展开
-
----
-
-## 5. 本轮最重要的结论
-
-本轮最重要的结论不是“保留了 1961 条”，而是：
-
-> 当前 step 05 的主要损耗来源不是 label mismatch，而是 teacher evidence 无法满足严格的 verbatim grounding 要求。
-
-具体看：
-
-- `label_mismatch = 0`
-- `evidence_not_grounded = 847`
-- `reason_length_out_of_range = 185`
-- `missing_evidence = 1`
-
-这说明经过 step 04 的补跑与修复后：
-
-- teacher 的主判断方向已经比较稳定
-- gold / teacher label 已经对齐
-- 当前最大问题转移到了 **explanation 质量控制**，尤其是 **evidence 是否真的逐字摘录**
+也就是说：
+- step 04 的平衡扩充并不能自动保证 step 05 后仍平衡
+- unsafe 类样本的 teacher 解释质量仍然更不稳定
 
 ---
 
-## 6. 为什么样本不被保留：逐类分析
+## 7. 本轮最重要的结论
 
-## 6.1 `evidence_not_grounded = 847`
+本轮最重要的结论不是“最终保留了 11626 条”，而是：
 
-这是最大的丢弃来源，占全部 dropped 的 **81.5%**。
+> 当前 step 05 的主要损耗来源仍然是 explanation 质量控制问题，而不是单纯数据量不够。
 
-这一类不是说 teacher 判断错了，而是说：
+尤其是：
+- `evidence_not_grounded = 2160`
+- `reason_length_out_of_range = 841`
+- `label_mismatch = 373`
 
-- teacher 给出了 evidence
-- evidence 从语义上常常是对的
-- 但 evidence 不是原文的严格逐字 span
-- 因而过不了当前的 strict grounding 规则
-
-这类样本的统计特征：
-- count: `847`
-- safe: `250`
-- unsafe: `597`
-- 平均 reason 长度: `350.82`
-- 平均 evidence 条数: `3.57`
-
-### 常见触发方式
-
-#### A. teacher 把 evidence 写成意译或概括
-
-例如 `train-53314`：
-- label: `unsafe`
-- teacher 判断本身合理
-- 但 evidence 中包含：
-  - `"Attention all seekers of truth!..."`
-  - `To subtly hint at the unverified rumors and initiate open discussion...`
-
-这里至少一部分 evidence 带引号或经过重新表述，无法被严格子串匹配命中。
-
-#### B. teacher 对表格/结构化文本做了重新格式化
-
-例如 `train-77836`：
-- teacher 引用了表格行和表头
-- 但格式、空格、排版和原始 response 不完全一致
-- 因此 grounding 失败
-
-#### C. teacher 用压缩引用代替逐字引用
-
-例如一些 unsafe 样本中，teacher 会写成：
-- 省略号 `...`
-- 合并多段内容
-- 去掉部分细节后概括为一条 evidence
-
-这在语义上可能没问题，但不符合当前“精确可定位监督”的要求。
-
-### 这一类的真正含义
-
-`evidence_not_grounded` 不等于 teacher 大规模误判。
-
-它更准确地意味着：
-
-> teacher 的判断和解释通常能成立，但它没有稳定遵守“evidence 必须是 exact substring”的标注契约。
-
-换句话说，当前 teacher 的 **reason 能力强于 evidence 精确摘录能力**。
+这说明当前 teacher 的主要短板依然集中在：
+1. evidence 不够稳定地遵守 exact substring 约束
+2. reason 经常写得太长
+3. 新扩充样本中出现了一定规模的 teacher/gold label 不一致
 
 ---
 
-## 6.2 `reason_length_out_of_range = 185`
+## 8. 丢弃原因分析
 
-这是第二大丢弃来源，占全部 dropped 的 **17.8%**。
+### 8.1 `evidence_not_grounded = 2160`
 
-当前长度阈值是：
+这是本轮最大的丢弃来源，占全部 dropped 的：
+- `2160 / 3374 = 64.02%`
+
+这类样本通常不是 teacher 主判断错误，而是：
+- evidence 是语义正确的概括
+- 但不是原 `question + response` 中的逐字片段
+- 或 teacher 做了轻微改写、压缩、重新格式化
+
+这说明：
+
+> teacher 的 reasoning 能力通常强于“精确摘录 evidence span”的能力。
+
+也就是说，当前 teacher 更容易写出“合理解释”，但不总能写出“严格可回指的证据片段”。
+
+这仍然是 step 05 的第一大瓶颈。
+
+### 8.2 `reason_length_out_of_range = 841`
+
+这是第二大丢弃来源，占全部 dropped 的：
+- `841 / 3374 = 24.93%`
+
+当前 step 05 的 reason 长度阈值是：
 - `min_reason_chars = 20`
 - `max_reason_chars = 400`
 
-见：
-- [scripts/05_filter_pseudo_labels.py:63-64](../scripts/05_filter_pseudo_labels.py#L63-L64)
-- [scripts/05_filter_pseudo_labels.py:98-100](../scripts/05_filter_pseudo_labels.py#L98-L100)
+来源见：
+- [scripts/05_filter_pseudo_labels.py:102-103](../scripts/05_filter_pseudo_labels.py#L102-L103)
 
-这类样本的统计特征：
-- count: `185`
-- safe: `37`
-- unsafe: `148`
-- 平均 reason 长度: `432.26`
-- 最短: `401`
-- 最长: `558`
+这批样本大概率主要是：
+- reason 太长
+- teacher 解释得过满
+- 生成风格更像自由分析，而不是稳定、紧凑的 SFT target
 
-也就是说，这一类几乎全是 **reason 太长**，而不是太短。
+这说明：
+- 当前 teacher 输出依然不够“收敛”
+- 对 step 06 来说，限制 reason 风格仍然是必要的
 
-### 典型现象
+### 8.3 `label_mismatch = 373`
 
-例如：
-- `train-28977`，`reason_len = 412`
-- `train-58243`，`reason_len = 416`
-- `train-31887`，`reason_len = 409`
+这是本轮一个值得特别注意的新点。
 
-这些样本的问题通常不是判断不对，而是：
-- 解释太满
-- 把多个判断层次都写进去了
-- 生成风格更像长分析，而不是紧凑训练 target
+在旧的 3000 条版本里，step 05 一度已经接近把 label mismatch 压到很低甚至 0；但这次扩充到 15000 条后，又出现了：
+- `label_mismatch = 373`
 
-### 这一类的真正含义
+占全部 dropped 的：
+- `373 / 3374 = 11.05%`
 
-这说明当前 teacher 经常能给出高质量判断，但不够“收敛”。
+这说明：
+- 新增的 12000 条 teacher 数据里，确实混入了一部分 teacher/gold 不一致样本
+- 也就是说，扩大量级后，teacher 的判断稳定性没有完全保持住旧版本水平
 
-对于 SFT 来说，过长 reason 会带来两个问题：
-- supervision 不够稳定
-- 训练目标风格不够统一
-
-因此这 185 条被过滤是合理的。
+这是和旧 3000 条版本相比，最值得额外关注的变化之一。
 
 ---
 
-## 6.3 `missing_evidence = 1`
+## 9. 这轮结果和旧 3000 条版本相比意味着什么
 
-这一类只有 1 条：
-- `train-80422`
+旧 3000 条版本的核心结论更偏向：
+- label mismatch 不是主要问题
+- 最大问题是 evidence grounding
 
-它的特点是：
-- reason 很长，约 `604` 字符
-- teacher 没给 evidence
-- 因此直接被 drop
+而这次 15000 条版本说明情况稍有变化：
 
-这不是系统性问题，只是极少数 teacher 输出结构不完整的尾部异常。
+### 不变的部分
 
----
+仍然成立的结论：
+- 最大问题依旧是 `evidence_not_grounded`
+- reason 过长仍然是第二大问题
+- unsafe 比 safe 更容易被过滤掉
 
-## 7. 关于已移除的 `refusal_style_reason` 规则
+### 新变化
 
-这一规则曾经尝试把带有 `I cannot assist`、`I'm sorry` 之类表达的 reason 过滤掉，出发点是避免把 teacher 自身拒答式输出当成 judge rationale。
+本轮新增暴露出的点：
+- 扩大量级后，`label_mismatch` 不再是可以忽略的 0 级问题
+- 新 teacher 样本里有一批样本在判断方向上与 gold label 不一致
 
-但后续抽查发现，这类表达在当前数据里经常出现在：
-- 原始 `response` 自身就是安全拒答
-- teacher 在 `reason` 中对该 `response` 做归纳描述
-- teacher 在 `evidence` 中逐字引用原始 `response`
+这意味着：
+- step 04 的扩充策略在“数量”上成功了
+- 但在“新增样本的一致性稳定性”上，仍然存在质量损耗
 
-也就是说，这更像是 **teacher 正在解释原始 response 为什么是 safe**，而不是 **teacher 自己在拒答**。
+换句话说：
 
-因此这条规则会误杀正常样本，现已从 step 05 中删除。当前 step 05 不再基于 refusal 风格文本单独 drop 样本。
-
----
-
-## 8. 本轮没有出现的情况：`label_mismatch = 0`
-
-这轮很重要的一点是：
-
-> `pseudo_label_mismatch.jsonl` 最终是空的，`label_mismatch_saved = 0`。
-
-这和旧版 step 05 记录已经不同了，旧结论现在应视为过时。
-
-当前最新状态下：
-- step 04 的补跑与 label 修复已经完成
-- teacher label 与 gold label 没有出现批量不一致
-- 当前 step 05 不再是“label disagreement 主导”的问题，而是“evidence / reason 质量控制主导”的问题
-
-这说明前一轮真正暴露出的核心工程问题不是 label semantics 崩坏，而是：
-- prompt 对 evidence verbatim 的约束不够强
-- teacher 有时写得太长
-- teacher 输出格式对 strict filter 不够友好
+> 扩充 teacher 数据是成功的，但并不是“无代价扩充”；规模变大后，数据质量分布也发生了变化。
 
 ---
 
-## 8. 对当前 step 05 结果的整体判断
+## 10. 当前对 step 05 结果的整体判断
 
-### 8.1 主过滤结果是可用的
+### 10.1 主过滤结果是可用的
 
-当前保留：
-- `1961 / 3000`
+当前保留下来：
+- `11626 / 15000`
 
-对于 MVP 阶段来说，这是足够继续 step 06 / 07 的规模。
+这对 MVP 后续的 SFT 已经是相当可观的数据池。
 
-### 8.2 当前最大瓶颈已经非常明确
+### 10.2 数据量显著提升
 
-当前 step 05 最大瓶颈不是标签对齐，而是：
+和旧 3000 条版本相比，当前最大直接收益是：
+- 最终可进入 step 06 的候选监督数据显著增加
 
-- evidence grounding 不够稳定
-- unsafe 样本更容易因 evidence / reason 问题被过滤
+这会直接提升：
+- SFT 训练集规模上限
+- 训练稳定性
+- 后续评估可用性
 
-### 8.3 这实际上在反向指导 step 04 prompt
+### 10.3 但分布重新失衡了
 
-step 05 的输出说明，下一轮 teacher prompt 调整方向应该重点针对：
+虽然 step 04 输入是 7500 / 7500，过滤后却变成：
+- safe: `6489`
+- unsafe: `5137`
 
-1. **要求 evidence 必须是 exact span**
-2. **禁止 paraphrase / summary / rewritten quote**
-3. **尽量缩短 reason**
-
-也就是说，step 05 已经不仅是过滤器，它实际上成了 step 04 prompt 调优的反馈信号。
+因此：
+- 后续 step 06 训练时要意识到分布已经偏 safe
+- 如果后续很关注 unsafe 表现，可能还需要额外的 rerun 或采样策略补偿
 
 ---
 
-## 9. 对后续工作的直接启发
+## 11. 对后续 rerun 的直接启发
 
-你已经提出了一个很合理的后续方向：
+这次 15000 条结果非常适合反向指导下一轮定向 rerun。
 
-> 扩展 step 04 的执行模式，允许基于 step 05 的 drop 结果，仅对会被过滤掉的样本重新跑 teacher。
+### 最值得定向重跑的两类
 
-从这次 step 05 结果看，这个方向非常值得做，原因是：
+1. `evidence_not_grounded`
+2. `reason_length_out_of_range`
 
-- 1039 条 dropped 里，大部分并不是语义错误
-- 它们只是没有满足 strict filter 的格式/引用要求
-- 如果换更强约束的 teacher prompt，仅对这些 drop 样本重跑，理论上有机会显著提高最终 kept 数
+原因：
+- 这两类通常不是 teacher 完全判断错了
+- 更多是输出风格/格式不满足 strict filter
+- 如果重新约束 prompt，理论上有机会提高 keep rate
 
-特别适合做二次补跑的，是：
+### 需要单独关注的一类
+
+3. `label_mismatch`
+
+这类不一定适合简单“按同一 prompt 再跑一次”解决，因为：
+- 它可能反映 teacher 真实判断偏离 gold label
+- 也可能反映部分原始标注与 teacher 判断张力较大
+
+因此，如果后续要做 rerun，建议把：
+- `label_mismatch`
 - `evidence_not_grounded`
 - `reason_length_out_of_range`
 
-不太值得专门重跑的，是：
-- `missing_evidence`（太少）
-
-### 当前已经支持的 rerun workflow
-
-当前脚本已经扩展为：
-
-1. step 05 可直接导出 dropped 子集：
-   - 默认输出 [data/interim/pseudo_dropped.jsonl](../data/interim/pseudo_dropped.jsonl)
-   - 每行保留原始 step 04 字段，并新增：
-     - `drop_reason`
-     - `dropped_at_step`
-     - `filter_config`
-
-2. step 04 可直接把 dropped 子集当输入重跑：
-   - 复用现有 `--input_path`
-   - 推荐配合 `--sampling_strategy first_n`
-   - 可加 `--rerun_tag` 区分这是否为一轮 drop-only rerun
-
-推荐命令示例：
-
-```bash
-uv run python scripts/05_filter_pseudo_labels.py \
-  --dropped_output_path data/interim/pseudo_dropped.jsonl
-
-uv run python scripts/04_generate_rationale_pseudo.py \
-  --input_path data/interim/pseudo_dropped.jsonl \
-  --output_path data/interim/pseudo_rerun.jsonl \
-  --sampling_strategy first_n \
-  --max_samples 1039 \
-  --rerun_tag drop_subset_rerun_v1
-```
-
-当前阶段建议：
-- rerun 输出先写入独立文件
-- 先观察新的 teacher prompt 是否真的改善 keep rate
-- merge policy 之后再单独设计，而不是现在就自动覆盖主文件
+分开看，而不是混成一个 dropped 子集统一重跑。
 
 ---
 
-## 10. 一句话总结
+## 12. 对 step 06 的直接影响
 
-这轮 step 05 的正式结果说明：
+当前 step 06 建议直接使用：
+- [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl)
 
-> 当前过滤链路已经稳定，但瓶颈非常集中：3000 条 step 04 teacher 输出中，真正阻止样本进入主训练集的主要原因不是 label 错，而是 teacher 没有稳定产出“可逐字定位的 evidence”和“长度受控的 concise reason”；因此下一步最值得做的不是放宽 step 05，而是让 step 04 支持针对 step 05 drop 样本的定向重跑。
+这是这轮 step 05 的主结果文件。
+
+注意事项：
+- 它的总量足够大，可以明显优于旧的 1961 条版本
+- 但标签分布已不再平衡
+- 如果 step 06 需要更严格控制类别分布，后续应在构造 train/dev 或训练采样时考虑这一点
+
+---
+
+## 13. 当前有效结论
+
+截至本轮，step 05 的最新有效结论如下：
+
+### 工程结论
+
+- step 05 本身逻辑稳定，没有成为本轮主要故障来源
+- 当前运行方式建议继续使用显式输出路径，避免覆盖旧结果
+- 新主结果文件应优先引用：
+  - [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl)
+
+### 数据结论
+
+- 从 15000 条 teacher 数据中保留了 11626 条
+- 最大瓶颈仍然是 evidence grounding
+- reason 过长仍然是第二大问题
+- 扩充到更大规模后，label mismatch 又重新出现，不能忽略
+- step 05 之后数据重新偏 safe，unsafe 损耗明显更高
+
+### 流程结论
+
+- step 04 扩容是有价值的，最终有效监督数据量确实显著变大
+- 但后续如果继续追求更高 kept 数，重点应放在：
+  - 改善 evidence exact span 约束
+  - 缩短 reason
+  - 降低新增样本里的 label mismatch
+
+---
+
+## 14. 一句话总结
+
+这轮 step 05 的最新结果说明：
+
+> 基于 [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl) 的正式过滤已经成功产出 [pseudo_filtered_15000.jsonl](../data/processed/pseudo_filtered_15000.jsonl)，最终从 15000 条 teacher 数据中保留了 11626 条；当前最大的质量瓶颈仍然是 evidence 不能严格 grounded，其次是 reason 过长，而扩大量级后重新出现的 373 条 label mismatch 则提示新增 teacher 数据的一致性仍需继续优化。
