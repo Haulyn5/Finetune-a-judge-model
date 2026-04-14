@@ -1,5 +1,5 @@
 [project]
-name = "judge-mvp"
+name = "finetune-a-judge-model"
 version = "0.1.0"
 description = "WildGuardMix content safety judge MVP"
 requires-python = ">=3.10,<3.12"
@@ -23,4 +23,3 @@ dependencies = [
 [tool.uv]
 index-url = "https://pypi.tuna.tsinghua.edu.cn/simple/"
 extra-index-url = ["https://mirrors.aliyun.com/pypi/simple/"]
-

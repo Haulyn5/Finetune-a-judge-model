@@ -55,14 +55,14 @@
 
 #### 1) lr=5e-5 completion_only
 
-- 训练命令：`cd "/root/project/learnTrainLLM/judge-mvp" && CUDA_VISIBLE_DEVICES=2 uv run python scripts/07_train_sft_lora.py --train_file data/processed/sft_train_15000.jsonl --eval_file data/processed/sft_dev_15000.jsonl --output_dir outputs/sft_lora_15000_lr_5e-5_completion_only --tensorboard_run_name step07_sft_lora_15000 --num_train_epochs 3 --per_device_train_batch_size 4 --per_device_eval_batch_size 4 --gradient_accumulation_steps 8 --learning_rate 5e-5 --max_seq_length 2048`
+- 训练命令：`cd "/root/project/learnTrainLLM" && CUDA_VISIBLE_DEVICES=2 uv run python scripts/07_train_sft_lora.py --train_file data/processed/sft_train_15000.jsonl --eval_file data/processed/sft_dev_15000.jsonl --output_dir outputs/sft_lora_15000_lr_5e-5_completion_only --tensorboard_run_name step07_sft_lora_15000 --num_train_epochs 3 --per_device_train_batch_size 4 --per_device_eval_batch_size 4 --gradient_accumulation_steps 8 --learning_rate 5e-5 --max_seq_length 2048`
 - 评估命令：`uv run python scripts/08_eval.py generate --mode lora --model_name_or_path /root/project/PretrainedModels/Qwen/Qwen3.5-4B --adapter_path outputs/sft_lora_15000_lr_5e-5_completion_only --test_file data/processed/test.jsonl --output_file outputs/qwen_lora_lr_5e-5_completion_only_test_predictions.jsonl --overwrite --gpu_id 1 --transformers_batch_size 32 --max_new_tokens 4096`
 - 训练产物目录：`outputs/sft_lora_15000_lr_5e-5_completion_only`
 - step 08 输出：`outputs/qwen_lora_lr_5e-5_completion_only_test_predictions.jsonl`
 
 #### 2) lr=3e-5 r32
 
-- 训练命令：`cd "/root/project/learnTrainLLM/judge-mvp" && CUDA_VISIBLE_DEVICES=2 uv run python scripts/07_train_sft_lora.py --train_file data/processed/sft_train_15000.jsonl --eval_file data/processed/sft_dev_15000.jsonl --output_dir outputs/sft_lora_15000_lr_3e-5_r32 --tensorboard_run_name step07_sft_lora_15000 --num_train_epochs 4 --per_device_train_batch_size 2 --per_device_eval_batch_size 2 --gradient_accumulation_steps 16 --learning_rate 3e-5 --max_seq_length 2048`
+- 训练命令：`cd "/root/project/learnTrainLLM" && CUDA_VISIBLE_DEVICES=2 uv run python scripts/07_train_sft_lora.py --train_file data/processed/sft_train_15000.jsonl --eval_file data/processed/sft_dev_15000.jsonl --output_dir outputs/sft_lora_15000_lr_3e-5_r32 --tensorboard_run_name step07_sft_lora_15000 --num_train_epochs 4 --per_device_train_batch_size 2 --per_device_eval_batch_size 2 --gradient_accumulation_steps 16 --learning_rate 3e-5 --max_seq_length 2048`
 - 评估命令：`uv run python scripts/08_eval.py generate --mode lora --model_name_or_path /root/project/PretrainedModels/Qwen/Qwen3.5-4B --adapter_path outputs/sft_lora_15000_lr_3e-5_r32 --test_file data/processed/test.jsonl --output_file outputs/qwen_lora_lr_3e-5_r32_test_predictions.jsonl --overwrite --gpu_id 0 --transformers_batch_size 32 --max_new_tokens 4096`
 - 训练产物目录：`outputs/sft_lora_15000_lr_3e-5_r32`
 - step 08 输出：`outputs/qwen_lora_lr_3e-5_r32_test_predictions.jsonl`
@@ -228,7 +228,7 @@
 
 如果目标是训练一个输出 `label + reason + evidence` 的安全 judge 模型，那么本次 step 09 的结果表明：
 
-> `qwen_lora` 是当前 judge-mvp 中最可用的主模型。它同时提升了分类性能、降低了相对不必要的误杀、并显著增强了结构化 JSON 输出与解释字段质量。
+> `qwen_lora` 是当前 Finetune-a-judge-model 项目里最可用的主模型。它同时提升了分类性能、降低了相对不必要的误杀、并显著增强了结构化 JSON 输出与解释字段质量。
 
 ## 相关文件
 

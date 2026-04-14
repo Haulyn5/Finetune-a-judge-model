@@ -1,11 +1,11 @@
-# Judge MVP: WildGuardMix 内容安全裁判模型
+# Finetune-a-judge-model: WildGuardMix 内容安全裁判模型
 
 这个项目从零搭建一个可执行的 LLM 后训练 MVP，目标是基于 `allenai/wildguardmix` 训练一个输出 `label + reason + evidence` 的内容安全裁判模型。
 
 ## 目录结构
 
 ```text
-judge-mvp/
+Finetune-a-judge-model/
 ├── configs/
 ├── data/
 │   ├── raw/
@@ -24,7 +24,7 @@ judge-mvp/
 推荐 Python 3.10+，并在项目内使用 `uv` 作为默认工作流。
 
 ```bash
-cd judge-mvp
+# 仓库根目录即项目目录
 cp .env.example .env
 set -a
 source .env

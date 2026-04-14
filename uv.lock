@@ -584,7 +584,7 @@ wheels = [
 ]
 
 [[package]]
-name = "judge-mvp"
+name = "finetune-a-judge-model"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

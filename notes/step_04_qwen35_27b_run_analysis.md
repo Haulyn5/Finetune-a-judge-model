@@ -367,6 +367,6 @@ dry run 结果确认：
 
 ## 14. 一句话总结
 
-当前 `judge-mvp` 的 step 04 已经从“3000 条 teacher 主跑 + 断点补跑”升级为一个更完整的扩充版本：
+当前 `Finetune-a-judge-model` 项目的 step 04 已经从“3000 条 teacher 主跑 + 断点补跑”升级为一个更完整的扩充版本：
 
 > 使用 `Qwen/Qwen3.5-27B + vLLM 0.18.0 + eager mode`，在跳过已处理样本的前提下，将 teacher 数据成功扩充到 [pseudo_raw_15000.jsonl](../data/interim/pseudo_raw_15000.jsonl)，最终达到 `safe=7500`、`unsafe=7500` 的平衡规模，并保留了完整备份与中间产物，可直接作为后续 step 05 的主输入。

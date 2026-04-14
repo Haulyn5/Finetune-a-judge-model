@@ -12,15 +12,15 @@ __pycache__/
 *.code-workspace
 
 # Data and outputs
-judge-mvp/data/raw/*
-judge-mvp/data/interim/*
-judge-mvp/data/processed/*
-!judge-mvp/data/raw/.gitkeep
-!judge-mvp/data/interim/.gitkeep
-!judge-mvp/data/processed/.gitkeep
-judge-mvp/outputs/*
-!judge-mvp/outputs/.gitkeep
-judge-mvp/logs/
+data/raw/*
+data/interim/*
+data/processed/*
+!data/raw/.gitkeep
+!data/interim/.gitkeep
+!data/processed/.gitkeep
+outputs/*
+!outputs/.gitkeep
+logs/
 PretrainedModels/
 
 # Training artifacts
